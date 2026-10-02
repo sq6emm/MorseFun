@@ -67,6 +67,8 @@ class Band:
             return f"{self.hz / 1e9:.6g} GHz"
         if self.hz >= 1e6:
             return f"{self.hz / 1e6:.6g} MHz"
+        if self.hz >= 1e3:
+            return f"{self.hz / 1e3:.6g} kHz"
         return f"{self.hz:.0f} Hz"
 
     def doppler_hz(self, velocity_mps: float | np.ndarray) -> float | np.ndarray:
@@ -145,7 +147,10 @@ def drop_diameters(rate_mm_h: float, count: int, rng: np.random.Generator) -> np
 
 
 def drop_fall_speed(diameters: np.ndarray) -> np.ndarray:
-    """Atlas-Ulbrich terminal velocity: ``v = 9.65 - 10.3 exp(-0.6 D)`` m/s."""
+    """Terminal velocity in m/s: ``v = 9.65 - 10.3 exp(-0.6 D)``, D in mm.
+
+    Atlas, Srivastava and Sekhon (1973); see the references in the README.
+    """
     return np.clip(9.65 - 10.3 * np.exp(-0.6 * diameters), 0.2, 10.0)
 
 

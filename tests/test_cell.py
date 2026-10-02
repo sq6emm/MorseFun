@@ -208,6 +208,23 @@ class TestEvolvingChannel(unittest.TestCase):
                            block_size(400.0, 44100, 500_000))
         self.assertEqual(block_size(10.0, 44100, 500_000) % 2, 0)
 
+    def test_a_block_is_never_longer_than_a_quarter_of_the_message(self):
+        # No transform resolves anything narrower than one over its own length,
+        # so a block that spans the whole render buys nothing and leaves nothing
+        # to overlap-add.
+        self.assertLessEqual(block_size(0.5, 44100, 200_000), 65536)
+        self.assertLessEqual(block_size(0.5, 44100, 40_000), 8192)
+
+    def test_the_ends_of_the_overlap_add_do_not_crack(self):
+        # The window power goes to zero at the two ends, and dividing by it would
+        # leave a spike there louder than the signal it was meant to carry.
+        components, _ = self.components()
+        spectrum = EvolvingSpectrum(components)
+        process = evolving_channel(60_000, 44100, spectrum, 600.0,
+                                   np.random.default_rng(1), 32768)
+        self.assertLess(float(np.abs(process).max()), 6.0)   # a Rayleigh peak, not a crack
+        self.assertAlmostEqual(float(np.mean(np.abs(process) ** 2)), 1.0, places=6)
+
     def test_the_grid_covers_everywhere_a_core_wanders(self):
         components, _ = self.components()
         spectrum = EvolvingSpectrum(components)

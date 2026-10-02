@@ -37,7 +37,7 @@ from .cell import CHARACTER_VALUES, parse_character
 from .cli import OVERRIDES, describe
 from .morse import Timing, duration, parse, timeline
 from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, PROFILES
-from .render import Config, render
+from .render import MODES, Config, apply_qrss, render
 from .wav import wav_bytes
 
 PAGE = Path(__file__).with_name("page.html")
@@ -47,10 +47,15 @@ PREFIX_HEADERS = ("X-Forwarded-Prefix", "X-Script-Name", "X-Ingress-Path")
 
 _AUDIO = re.compile(r"/audio/([A-Za-z0-9_-]{1,64})\.wav$")
 
-#: Nobody needs to tie the box up for longer than this with one message.
+#: Nobody needs to tie the box up for longer than this with one message.  QRSS
+#: is slow on purpose, so the ceiling is minutes rather than seconds -- a
+#: three-second dit spends about half a minute on a single word.
 MAX_CHARACTERS = 300
-MAX_SECONDS = 90.0
-KEEP_RENDERS = 24
+MAX_SECONDS = 1200.0
+KEEP_RENDERS = 12
+
+#: A QRSS render is minutes of audio, so the store is bounded by weight too.
+KEEP_BYTES = 120_000_000
 
 _TYPES = {f.name: str(f.type) for f in dataclass_fields(Config)}
 
@@ -90,19 +95,31 @@ def config_from_payload(payload: dict) -> tuple[Config, str]:
             setattr(cfg, field, wanted)
     if str(payload.get("no_noise", "")).lower() in ("1", "true", "yes", "on"):
         cfg.snr_db = None
+    if str(payload.get("echo_test", "")).lower() in ("1", "true", "yes", "on"):
+        cfg.rician_db = 6.0          # your own keying, with the echo under it
+    qrss = coerce("wpm", payload.get("qrss"))
+    if qrss:
+        apply_qrss(cfg, float(qrss),
+                   keep_rise=payload.get("rise_ms") not in (None, ""),
+                   keep_rate=payload.get("rate") not in (None, ""))
     seed = coerce("seed", payload.get("seed"))
     cfg.seed = int(seed) if seed is not None else secrets.randbelow(2**31)
     return cfg, profile
 
 
 def spectrogram(samples: np.ndarray, sample_rate: int, tone_hz: float,
-                span_hz: float = 900.0, columns: int = 260, rows: int = 150) -> dict:
+                dit_s: float = 0.05, columns: int = 260, rows: int = 150) -> dict:
     """A small dB spectrogram around the note, as bytes a canvas can paint.
 
-    This is where the cell shows itself: a stratiform path draws a thin line,
-    a storm core draws a band that wanders and breathes.
+    This is where the path shows itself: a stratiform cell draws a thin line, a
+    storm core a band that wanders and breathes, and a QRSS trace nothing at all
+    unless the transform is long enough to see it.  So the window follows the
+    keying -- half a dit, bounded -- and the span follows the window, which is
+    how a waterfall program is set up by hand anyway.
     """
-    window = 2048
+    want = float(np.clip(dit_s * sample_rate / 2.0, 2048, 65536))
+    window = 1 << int(round(np.log2(want)))
+    span_hz = float(np.clip(90.0 * sample_rate / window, 20.0, 900.0))
     if samples.size < window * 2:
         return {}
     hop = max((samples.size - window) // columns, 1)
@@ -129,6 +146,7 @@ def spectrogram(samples: np.ndarray, sample_rate: int, tone_hz: float,
         "low_hz": float(freqs[keep][0]),
         "high_hz": float(freqs[keep][-1]),
         "seconds": float(samples.size / sample_rate),
+        "bin_hz": float(sample_rate / window),
         "data": base64.b64encode(pixels.tobytes()).decode("ascii"),
     }
 
@@ -145,7 +163,10 @@ class Renders:
         token = secrets.token_urlsafe(9)
         with self._lock:
             self._items[token] = (payload, time.time())
-            while len(self._items) > self.keep:
+            while (len(self._items) > self.keep
+                   or sum(len(item[0]) for item in self._items.values()) > KEEP_BYTES):
+                if len(self._items) <= 1:
+                    break
                 self._items.popitem(last=False)
         return token
 
@@ -162,7 +183,8 @@ def options() -> dict:
                      for name in sorted(PROFILES)],
         "default_profile": DEFAULT_PROFILE,
         "characters": ["auto", *CHARACTER_VALUES],
-        "scatter": ["none", "rain", "snow", "aurora"],
+        "scatter": [name for name in MODES],
+        "qrss": [3, 10, 30, 60, 120],
     }
 
 
@@ -282,7 +304,8 @@ class Handler(BaseHTTPRequestHandler):
             # Relative, so it still points here under a proxy's path.
             "audio": f"audio/{token}.wav",
             "report": describe(result, "", profile).strip("\n"),
-            "spectrogram": spectrogram(result.samples, result.sample_rate, cfg.freq),
+            "spectrogram": spectrogram(result.samples, result.sample_rate, cfg.freq,
+                                       float(result.meta["dit_ms"]) / 1000.0),
             "seed": cfg.seed,
             "profile": profile,
             "took_ms": round((time.time() - started) * 1000),

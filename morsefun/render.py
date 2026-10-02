@@ -22,13 +22,16 @@ import numpy as np
 from .cell import (Cell, cell_doppler, draw_cell, evolution, parse_character,
                    sounds_like)
 from .dsp import bandpass, db_to_amp, fast_length, rms, soft_limit
+from .moon import draw_moon, faraday_fade, moon_doppler
 from .morse import Timing, duration, parse, timeline, to_code
 from .noise import NoiseSpec, build_noise
 from .propagation import (REFERENCE_RATE_MM_H, AuroraSpec, Band, aurora_doppler,
                           parse_band, reflectivity_dbz)
-from .scatter import (EvolvingSpectrum, ScatterSpec, activity_gate, apply_channel,
-                      audible_fraction, block_size, channel, doppler_spectrum,
-                      evolving_channel, frame_count, rician_weights, scintillate)
+from .scatter import (Component, EvolvingSpectrum, ScatterSpec, activity_gate,
+                      apply_channel, audible_fraction, block_size, channel,
+                      coherent_channel, doppler_spectrum, evolving_channel,
+                      frame_count, rician_weights, scintillate)
+from .skywave import draw_iono, iono_carriers
 from .synth import ToneSpec, keyed_tone
 
 #: Every random stream in a render, in a fixed order, so a given seed always
@@ -37,6 +40,53 @@ STREAMS = ("signal", "weather", "scatter", "floor", "crashes", "qrm", "birdies")
 
 #: The modes that are a volume of weather with cores in it.
 WEATHER_MODES = ("rain", "snow")
+
+#: What people call these paths, and what this module calls them.
+MODE_ALIASES = {"eme": "moon", "lunar": "moon", "skywave": "iono",
+                "ionosphere": "iono", "iono": "iono", "moon": "moon"}
+
+MODES = ("none", "rain", "snow", "aurora", "iono", "moon")
+
+#: Below three words a minute nobody is listening by ear any more: the message
+#: is read off a waterfall, in a bin about 1/dit wide.  That is QRSS.
+QRSS_DIT_S = 0.4
+
+#: A render has to fit in memory and in somebody's afternoon.
+MAX_SAMPLES = 40_000_000
+
+
+def mode_name(scatter: str | None) -> str:
+    """The canonical name of a propagation mode, or ``none``."""
+    name = str(scatter or "none").strip().lower()
+    if name in ("", "none"):
+        return "none"
+    return MODE_ALIASES.get(name, name)
+
+
+def qrss_label(dit_s: float) -> str:
+    """``QRSS3`` for a three-second dit, the way everybody writes it."""
+    return f"QRSS{dit_s:g}" if dit_s >= 1.0 else f"dit {dit_s * 1000:.0f} ms"
+
+
+def apply_qrss(cfg: Config, dit_s: float, keep_rise: bool = False,
+               keep_rate: bool = False) -> Config:
+    """Set a keying speed from a dit length in seconds, and keep it narrow.
+
+    Two things come with it unless they were asked for by hand.  The envelope
+    has to rise slowly -- a three-second dit with a five-millisecond edge has
+    sidebands two hundred Hz out, which is absurd when the whole point is a
+    trace a tenth of a Hz wide -- and the sample rate can come down, because
+    nothing above a couple of kHz is wanted and the file would otherwise be
+    enormous.
+    """
+    if dit_s <= 0:
+        raise ValueError("a dit has to last longer than that")
+    cfg.wpm = 1.2 / float(dit_s)
+    if not keep_rise:
+        cfg.rise_ms = float(min(max(dit_s * 1000.0 / 15.0, 5.0), 400.0))
+    if not keep_rate and dit_s >= QRSS_DIT_S:
+        cfg.sample_rate = 8000
+    return cfg
 
 
 def streams(seed: int | None) -> dict[str, np.random.Generator]:
@@ -98,6 +148,19 @@ class Config:
     evolve: bool = True                   # let the cell change while you listen
     evolve_rate_hz: float | None = None
     qrm_scatter: bool = True              # the neighbours are on the same cell
+    # EME: the Moon is 2.5 seconds away and never holds still
+    moon_distance_km: float | None = None
+    libration_deg_day: float | None = None    # apparent rotation, 0.2 .. 8
+    moon_range_rate_mps: float | None = None  # own Doppler, up to ±465 m/s
+    moon_accel_mps2: float | None = None      # how fast that changes
+    moon_scatter_law: float | None = None     # cos^n across the disc
+    faraday_db: float | None = None           # VHF polarisation fading
+    doppler_track: bool = True                # follow the Doppler, as rigs do
+    # a low band: the skywave path, seen through a milliHertz filter
+    iono_modes: int | None = None             # hops or magneto-ionic components
+    layer_rate_mps: float | None = None       # how fast the layer is moving
+    layer_turbulence_mps: float | None = None
+    takeoff_deg: float | None = None
     # aurora
     aurora_drift_mps: float = 600.0
     aurora_spread_mps: float = 200.0
@@ -215,7 +278,8 @@ def _weather_path(cfg: Config, env: np.ndarray, band: Band, mode: str,
     components = evolution(
         cell, samples, frame_count(env.size, block), hop / cfg.sample_rate,
         rngs["weather"], evolve=cfg.evolve)
-    spectrum = EvolvingSpectrum(components)
+    spectrum = EvolvingSpectrum(components, smooth_hz=max(
+        float(info["spread_hz"]) / 12.0, 0.8 * cfg.sample_rate / max(block, 1)))
 
     # What is quoted is the spectrum averaged over the whole message, wander and
     # all, because that is what the ear integrates.
@@ -277,6 +341,107 @@ def _aurora_path(cfg: Config, env: np.ndarray, band: Band,
     return apply_channel(env, cfg.freq, cfg.sample_rate, process), info
 
 
+def _narrow_block(spread_hz: float, sample_rate: int, size: int) -> int:
+    """Analysis block for a path whose spectrum is a hair wide.
+
+    A skywave or libration-minimum spectrum can be hundredths of a Hz across,
+    so the usual couple of thousand samples would synthesise something a
+    hundred times too wide.  These paths are allowed a block up to a million
+    samples -- two minutes at 8 kHz -- which is fine, because nothing in them
+    changes in two minutes either.
+    """
+    return block_size(max(float(spread_hz), 1e-3), sample_rate, size, hi=1 << 20)
+
+
+def _iono_path(cfg: Config, env: np.ndarray, band: Band,
+               rngs: dict[str, np.random.Generator]):
+    """A low band: one or more coherent hops off a layer that will not hold still."""
+    spec = draw_iono(rngs["weather"], band, modes=cfg.iono_modes,
+                     height_rate_mps=cfg.layer_rate_mps,
+                     turbulence_mps=cfg.layer_turbulence_mps,
+                     elevation_deg=cfg.takeoff_deg)
+    carriers, info = iono_carriers(spec, band)
+
+    info["tuned_out_hz"] = 0.0
+    if cfg.retune:
+        # The operator sits on the trace, not on the nominal frequency.
+        info["tuned_out_hz"] = float(info["shift_hz"])
+        for carrier in carriers:
+            carrier.shift_hz -= float(info["shift_hz"])
+    info["audible_fraction"] = 1.0
+    info["sounds_like"] = sounds_like(float(info["spread_hz"]),
+                                      float(info["audible_fraction"]))
+    process = coherent_channel(env.size, cfg.sample_rate, carriers, rngs["scatter"])
+    depth = 0.0 if cfg.scintillation_db is None else float(cfg.scintillation_db)
+    info["scintillation_db"] = depth
+    if depth > 0:
+        process = process * scintillate(
+            env.size, cfg.sample_rate, rngs["scatter"], depth,
+            float(cfg.scintillation_rate or 0.05))
+    return apply_channel(env, cfg.freq, cfg.sample_rate, process), info
+
+
+def _moon_path(cfg: Config, env: np.ndarray, band: Band, spec,
+               rngs: dict[str, np.random.Generator]):
+    """EME: the whole face of the Moon answering, 2.5 seconds late."""
+    freqs, weights, info = moon_doppler(spec, band, rngs["weather"])
+    block = _narrow_block(info["spread_hz"], cfg.sample_rate, env.size)
+    hop = max(block // 2, 1)
+    frames = frame_count(env.size, block)
+
+    # Where the echo sits: the station's own Doppler, and the ramp as the Earth
+    # turns under it.  A rig that tracks takes both out; a dial takes out the
+    # offset and leaves the ramp to slope the trace across the screen.
+    middle = 0.5 * (frames - 1) * hop / cfg.sample_rate
+    seconds = np.arange(frames) * hop / cfg.sample_rate - middle
+    ramp = np.zeros(frames) if spec.track else (
+        float(info["own_doppler_hz"]) + float(info["drift_hz_s"]) * seconds)
+    spectrum = EvolvingSpectrum(
+        [Component(freqs=freqs, weights=weights, centre_hz=0.0,
+                   gain=np.ones(frames), shift=ramp, width=np.ones(frames))],
+        smooth_hz=max(float(info["spread_hz"]) / 12.0,
+                      1.2 * cfg.sample_rate / max(block, 1)))
+
+    # The spread that gets quoted is the one libration actually puts on the echo.
+    # Six seconds of audio cannot resolve a hundredth of a Hz, but that is a
+    # limit of the transform, and the report is about the path.
+    shift, _ = spectrum.moments()
+    info["shift_hz"] = shift
+    info["tuned_out_hz"] = 0.0
+    if cfg.retune:
+        info["tuned_out_hz"] = shift
+        spectrum.retune(-shift)
+    info["audible_fraction"] = audible_fraction(
+        spectrum.grid, spectrum.mean_psd(), cfg.freq, cfg.bandwidth, cfg.sample_rate)
+    if spec.track:
+        # Tracking took out the offset and the ramp; the dial took out whatever
+        # the disc itself was offset by.  Say so as one number.
+        info["tuned_out_hz"] = float(info["own_doppler_hz"]) + float(info["tuned_out_hz"])
+    info["residual_drift_hz_s"] = 0.0 if spec.track else float(info["drift_hz_s"])
+    info["sounds_like"] = sounds_like(float(info["spread_hz"]),
+                                      float(info["audible_fraction"]))
+
+    # The echo is late: 2.4 to 2.7 seconds, which is the whole charm of it.
+    delay = int(round(spec.delay_s * cfg.sample_rate))
+    late = np.zeros_like(env)
+    if delay < env.size:
+        late[delay:] = env[:env.size - delay]
+
+    process = evolving_channel(
+        env.size, cfg.sample_rate, spectrum, cfg.freq, rngs["scatter"], block)
+    if (spec.faraday_db or 0.0) > 0.5:
+        process = process * faraday_fade(
+            env.size, cfg.sample_rate, rngs["scatter"],
+            float(spec.faraday_db), float(spec.faraday_period_s or 600.0))
+    depth = 0.0 if cfg.scintillation_db is None else float(cfg.scintillation_db)
+    info["scintillation_db"] = depth
+    if depth > 0:
+        process = process * scintillate(
+            env.size, cfg.sample_rate, rngs["scatter"], depth,
+            float(cfg.scintillation_rate or 0.1))
+    return apply_channel(late, cfg.freq, cfg.sample_rate, process), info
+
+
 def _station_scatter(cfg: Config, band: Band, cell: Cell, mode: str):
     """Scatter the other stations too -- same front, their own path into it.
 
@@ -305,15 +470,34 @@ def render(text: str, config: Config | None = None) -> Render:
     cfg = config or Config()
     rngs = streams(cfg.seed)
     band = cfg.band_object()
-    mode = (cfg.scatter or "none").lower()
-    if mode not in ("none", "") and mode not in WEATHER_MODES and mode != "aurora":
+    mode = mode_name(cfg.scatter)
+    if mode not in MODES:
         raise ValueError(f"unknown scatter mode: {cfg.scatter!r}")
 
     words, unknown = parse(text)
     timing = Timing(cfg.wpm, cfg.effective_wpm)
     elements = timeline(words, timing)
     keyed = duration(elements)
-    wanted = max(1, int(np.ceil((keyed + 2 * cfg.pad) * cfg.sample_rate)))
+
+    # The Moon has to be drawn before the buffer is sized: the echo arrives
+    # after the message has finished, and it has to have somewhere to land.
+    moon = None
+    tail = 0.0
+    if mode == "moon":
+        moon = draw_moon(
+            rngs["weather"], band, distance_km=cfg.moon_distance_km,
+            libration_deg_day=cfg.libration_deg_day,
+            range_rate_mps=cfg.moon_range_rate_mps,
+            range_accel_mps2=cfg.moon_accel_mps2,
+            scatter_law=cfg.moon_scatter_law, faraday_db=cfg.faraday_db,
+            patches=cfg.scatterers, track=cfg.doppler_track)
+        tail = moon.delay_s
+
+    wanted = max(1, int(np.ceil((keyed + 2 * cfg.pad + tail) * cfg.sample_rate)))
+    if wanted > MAX_SAMPLES:
+        raise ValueError(
+            f"that is {wanted / cfg.sample_rate / 60:.0f} minutes of audio; send it "
+            f"faster, shorten it, or drop --rate")
     # Everything downstream is a transform over the whole length, so work at a
     # length the FFT likes and trim the few extra samples of silence off at the
     # end: the same audio, several times faster.
@@ -328,6 +512,10 @@ def render(text: str, config: Config | None = None) -> Render:
     if cfg.scatter_spec().active:
         if mode in WEATHER_MODES:
             scattered, scatter_info, cell = _weather_path(cfg, env, band, mode, rngs)
+        elif mode == "iono":
+            scattered, scatter_info = _iono_path(cfg, env, band, rngs)
+        elif mode == "moon":
+            scattered, scatter_info = _moon_path(cfg, env, band, moon, rngs)
         else:
             scattered, scatter_info = _aurora_path(cfg, env, band, rngs)
         direct_amp, scatter_amp = rician_weights(cfg.rician_db)
@@ -400,6 +588,27 @@ def render(text: str, config: Config | None = None) -> Render:
     if up_rms > 1e-9 and down_rms > up_rms:
         measured = 20.0 * float(np.log10(np.sqrt(down_rms**2 - up_rms**2) / up_rms))
 
+    # QRSS: the message is not listened to, it is read off a waterfall in a bin
+    # about 1/dit wide, and that narrowness is the whole point -- as long as
+    # nothing on the path smears the trace wider than the bin.
+    qrss: dict[str, object] = {}
+    if timing.unit >= QRSS_DIT_S:
+        detection = 1.0 / timing.unit
+        gain = 10.0 * float(np.log10(max(cfg.bandwidth, 1.0) / detection))
+        spread = float(scatter_info.get("spread_hz", 0.0) or 0.0)
+        smear = 10.0 * float(np.log10(max(spread / detection, 1.0)))
+        qrss = {
+            "label": qrss_label(timing.unit),
+            "drift_hz": cfg.drift_hz,
+            "dit_s": timing.unit,
+            "bandwidth_hz": detection,
+            "processing_gain_db": gain,
+            "smear_db": -smear,
+            "smeared": spread > detection,
+            "waterfall_snr_db": (None if effective_snr is None
+                                 else float(effective_snr) + gain - smear),
+        }
+
     meta: dict[str, object] = {
         "text": text.strip(),
         "code": to_code(words),
@@ -420,6 +629,7 @@ def render(text: str, config: Config | None = None) -> Render:
         "wavelength_mm": band.wavelength_m * 1000.0,
         "hz_per_mps": float(band.doppler_hz(1.0)),
         "scatter": scatter_info,
+        "qrss": qrss,
         "snr_db": cfg.snr_db,
         "effective_snr_db": effective_snr,
         "measured_snr_db": measured,

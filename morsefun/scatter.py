@@ -108,6 +108,33 @@ def audible_fraction(
     return float(psd[inside].sum() / psd.sum())
 
 
+def _shape_on(freqs: np.ndarray, playable: np.ndarray, grid: np.ndarray,
+              psd: np.ndarray) -> np.ndarray | None:
+    """Sample a power spectrum onto FFT bins, or ``None`` if nothing lands.
+
+    A spectrum can be narrower than one bin -- a skywave trace is milliHertz
+    wide and the bins are tenths of a Hz -- and interpolating it would then come
+    back all zeros and synthesise silence.  In that case the whole of it goes in
+    the nearest bin, which is the best a transform this length can say.
+    """
+    shape = np.where(playable, np.interp(freqs, grid, psd, left=0.0, right=0.0), 0.0)
+    if shape.sum() > 0:
+        return shape
+    total = float(psd.sum())
+    if total <= 0:
+        return None
+    centre = float(np.sum(grid * psd) / total)
+    candidates = np.where(playable)[0]
+    if candidates.size == 0:
+        return None
+    nearest = candidates[np.argmin(np.abs(freqs[candidates] - centre))]
+    if abs(freqs[nearest] - centre) > max(abs(freqs[1] - freqs[0]), 1e-9):
+        return None            # the spectrum is outside the band, not just narrow
+    shape = np.zeros_like(freqs)
+    shape[nearest] = total
+    return shape
+
+
 def channel(
     n: int,
     sample_rate: int,
@@ -125,10 +152,9 @@ def channel(
     if n == 0 or psd.sum() <= 0:
         return np.zeros(n, dtype=np.complex128)
     freqs = np.fft.fftfreq(n, 1.0 / sample_rate)
-    shape = np.interp(freqs, grid, psd, left=0.0, right=0.0)
     playable = (freqs + tone_hz > 20.0) & (freqs + tone_hz < sample_rate / 2.0 - 20.0)
-    shape = np.where(playable, shape, 0.0)
-    if shape.sum() <= 0:
+    shape = _shape_on(freqs, playable, grid, psd)
+    if shape is None:
         return np.zeros(n, dtype=np.complex128)
 
     white = rng.standard_normal(n) + 1j * rng.standard_normal(n)
@@ -237,7 +263,11 @@ class EvolvingSpectrum:
                 edges.append(centre + (fmin - centre) * stretch + low)
                 edges.append(centre + (fmax - centre) * stretch + high)
             lo, hi = min(edges), max(edges)
-        self.width_hz = float(smooth_hz) if smooth_hz else max(spread / 12.0, 1.0)
+        # No absolute floor: a libration-minimum echo or a 2200 m skywave trace
+        # is hundredths of a Hz wide, and a 1 Hz kernel would smear it into
+        # something it is not.  Callers who are about to synthesise pass the
+        # resolution they can actually reach.
+        self.width_hz = float(smooth_hz) if smooth_hz else max(spread / 12.0, 1e-4)
         if hi - lo < 8 * self.width_hz:
             middle = 0.5 * (lo + hi)
             lo, hi = middle - 4 * self.width_hz, middle + 4 * self.width_hz
@@ -293,7 +323,10 @@ def block_size(spread_hz: float, sample_rate: int, n: int,
     want = bins * sample_rate / max(float(spread_hz), 1.0)
     want = float(np.clip(want, lo, hi))
     size = 1 << int(np.ceil(np.log2(want)))
-    ceiling = 1 << int(np.ceil(np.log2(max(n, lo))))
+    # Never longer than a quarter of the message: no transform can resolve
+    # something narrower than one over its own length, so asking for a block
+    # that spans the whole render buys nothing and leaves no frames to add.
+    ceiling = 1 << int(np.floor(np.log2(max(int(n) // 4, lo))))
     return int(min(size, max(lo, ceiling)))
 
 
@@ -333,15 +366,73 @@ def evolving_channel(
         start = frame * hop
         norm[start:start + block] += window**2
         psd = spectrum.psd(min(frame, spectrum.frames - 1))
-        shape = np.interp(freqs, spectrum.grid, psd, left=0.0, right=0.0)
-        shape = np.where(playable, shape, 0.0)
-        if shape.sum() <= 0:
+        shape = _shape_on(freqs, playable, spectrum.grid, psd)
+        if shape is None:
             continue
         segment = white[start:start + block] * window
         coloured = np.fft.ifft(np.fft.fft(segment) * np.sqrt(shape))
         out[start:start + block] += coloured * window
 
-    out = out[:n] / np.where(norm[:n] > 1e-9, norm[:n], 1.0)
+    # Weighted overlap-add divides by the window power, but at the two ends only
+    # one window covers each sample and that power goes to zero: dividing there
+    # would amplify the edge into a crack louder than the signal.  Clamping it
+    # tapers the first and last half block instead, which is silence anyway.
+    steady = float(np.sum(window**2) / hop)
+    out = out[:n] / np.maximum(norm[:n], 0.25 * steady)
+    power = float(np.mean(np.abs(out) ** 2))
+    if power <= 1e-30:
+        return np.zeros(n, dtype=np.complex128)
+    return out / np.sqrt(power)
+
+
+@dataclass
+class Carrier:
+    """A path that arrives coherently: one tone, wandering slowly.
+
+    Volume scatter is diffuse and belongs in :class:`EvolvingSpectrum`, but a
+    skywave hop off a layer is not: it arrives as a carrier, and what the
+    ionosphere does to it is move it about by milliHertz.  Two of them at
+    slightly different Doppler beat against each other, which is the slow QSB
+    on every low-band QRSS screen -- it comes out of the sum, not out of a
+    fading model.
+    """
+
+    shift_hz: float = 0.0
+    spread_hz: float = 0.0        # rms of its frequency wander
+    wander_rate_hz: float = 0.01  # how fast it wanders
+    level: float = 1.0            # amplitude, before normalising
+    fade_db: float = 0.0          # slow fading of its own
+    fade_rate_hz: float = 0.01
+
+
+def coherent_channel(
+    n: int, sample_rate: int, carriers: list[Carrier], rng: np.random.Generator,
+    ticks_hz: float = 20.0,
+) -> np.ndarray:
+    """Sum of slowly wandering carriers, normalised to unit mean power.
+
+    The wander is drawn at a few ticks a second and interpolated, because
+    nothing here changes faster than that and a message in QRSS runs for
+    minutes: there is no point building milliHertz noise at the sample rate.
+    """
+    if n <= 0 or not carriers:
+        return np.zeros(max(n, 0), dtype=np.complex128)
+    ticks = max(int(n / sample_rate * max(ticks_hz, 0.5)) + 2, 8)
+    coarse = np.linspace(0.0, n / sample_rate, ticks)
+    t = np.arange(n) / sample_rate
+    out = np.zeros(n, dtype=np.complex128)
+    for carrier in carriers:
+        wander = np.clip(smooth_noise(ticks, ticks / max(coarse[-1], 1e-9),
+                                      max(carrier.wander_rate_hz, 1e-4), rng), -3.0, 3.0)
+        freq = carrier.shift_hz + carrier.spread_hz * np.interp(t, coarse, wander)
+        amplitude = np.full(n, float(carrier.level))
+        if carrier.fade_db > 0:
+            swing = np.clip(smooth_noise(ticks, ticks / max(coarse[-1], 1e-9),
+                                         max(carrier.fade_rate_hz, 1e-4), rng), -2.5, 2.5)
+            fade = carrier.fade_db * (np.interp(t, coarse, swing) / 2.5 - 1.0) / 2.0
+            amplitude = amplitude * np.power(10.0, fade / 20.0)
+        phase = 2 * np.pi * np.cumsum(freq) / sample_rate + rng.uniform(0, 2 * np.pi)
+        out += amplitude * np.exp(1j * phase)
     power = float(np.mean(np.abs(out) ** 2))
     if power <= 1e-30:
         return np.zeros(n, dtype=np.complex128)

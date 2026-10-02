@@ -1,9 +1,12 @@
 # MorseFun
 
-Morse code generator for the microwave bands: type a message, hear it the way it
-would come back off a rain cell at 10 GHz. It writes a WAV file only if you ask
-for one, and it will [serve itself as a web page](#live-in-a-browser) if you would
-rather turn the knobs in a browser.
+Morse code generator for the bands where propagation is the loudest thing in the
+signal: type a message and hear it the way it would come back off a rain cell at
+10 GHz, off a layer on 2200 m, or off the Moon. It does 23 wpm and it does
+[QRSS](#qrss-a-dit-that-lasts-seconds), where one dit lasts three seconds and the
+message is read off a waterfall. It writes a WAV file only if you ask for one, and
+it will [serve itself as a web page](#live-in-a-browser) if you would rather turn
+the knobs in a browser.
 
 ```bash
 python -m morsefun "cq cq de sq6emm sq6emm k" --wpm 23 --tone 600
@@ -160,7 +163,7 @@ What is sampled inside that volume:
 
 | What | How it is sampled |
 | --- | --- |
-| Rain | Drop sizes from Marshall-Palmer (`N(D) = N0 exp(-4.1 R^-0.21 D)`), fall speeds from Atlas-Ulbrich (`v = 9.65 - 10.3 exp(-0.6 D)` m/s), each drop weighted by `D^6` |
+| Rain | Drop sizes from Marshall-Palmer (`N(D) = N0 exp(-4.1 R^-0.21 D)`), fall speeds from Atlas, Srivastava and Sekhon (`v = 9.65 - 10.3 exp(-0.6 D)` m/s), each drop weighted by `D^6` |
 | Snow | Aggregate sizes from Gunn-Marshall, falling at about a metre a second whatever their size, dry flakes 6.5 dB down on the ice dielectric factor, wet ones brighter than rain |
 | Aurora | Field-aligned E-region irregularities drifting at hundreds of m/s with a turbulent spread, patchy log-normal reflectors, alive only part of the time |
 
@@ -228,6 +231,162 @@ would; `--no-retune` leaves it where the Doppler put it. `--rician 6` mixes a
 direct path back in at 6 dB above the scatter, for a path that is not entirely
 over the horizon.
 
+## QRSS: a dit that lasts seconds
+
+```bash
+python -m morsefun "vvv de sq6emm" --profile lf-qrss              # 2200 m, dit 3 s
+python -m morsefun "vvv de sq6emm" --profile 30m-qrss --qrss 10
+python -m morsefun "vvv de sq6emm" --profile eme-qrss             # off the Moon
+python -m morsefun "vvv" --qrss 3 --band 137.5k --scatter iono --snr -14
+```
+
+QRSS is CW slowed down until it stops being something you hear and becomes
+something you look at. `--qrss 3` is a three-second dit, which is nothing more
+exotic than 0.4 wpm, and the point of it is the bin: a signal that takes three
+seconds to say a dit can be read in a bandwidth of about a third of a Hz, which
+is 32 dB narrower than a 500 Hz filter. That is the whole trade — the message
+takes a thousand times longer and arrives 30 dB stronger.
+
+| `--qrss` | dit | bin | against a 500 Hz filter | `vvv de sq6emm` takes |
+| --- | --- | --- | --- | --- |
+| 3 | 3 s | 0.33 Hz | +32 dB | 6 min |
+| 10 | 10 s | 0.1 Hz | +37 dB | 20 min |
+| 30 | 30 s | 33 mHz | +42 dB | 1 h |
+| 60 | 60 s | 17 mHz | +45 dB | 2 h |
+| 120 | 120 s | 8 mHz | +48 dB | 4 h |
+
+Two things come with `--qrss` unless you ask for something else. The envelope
+slows down — a three-second dit with the usual 5 ms edge has sidebands 200 Hz
+out, which is absurd when the trace is a third of a Hz wide — and the sample
+rate drops to 8 kHz, because nothing above a couple of kHz is wanted and the
+file would otherwise be enormous. Even so, a render that would run for hours is
+refused rather than attempted.
+
+The report says what the bin is worth, and the model is honest about what takes
+it back: **anything that smears the trace wider than the bin.** A path spread of
+1 Hz against a 0.33 Hz bin throws away 5 dB of the gain, and so does a rig that
+drifts further than the bin is wide — which the report also says, because a
+free-running VFO is the usual reason a QRSS trace is unreadable.
+
+## Low bands: a layer that will not hold still
+
+```bash
+python -m morsefun "vvv de sq6emm" --profile lf-qrss     # 2200 m
+python -m morsefun "vvv de sq6emm" --profile mf-qrss     # 630 m
+python -m morsefun "vvv de sq6emm" --profile 30m-qrss    # the knights' band
+```
+
+`--scatter iono` is a skywave hop on a low band. At 137 kHz the wavelength is
+2.2 km, so a metre per second of motion is 0.9 **milli**Hertz: nothing, unless
+you are looking at the signal in a bin a tenth of a Hz wide, which is exactly
+what QRSS does. The one thing that matters at these wavelengths is that the
+reflecting layer moves up and down, and a one-hop path gets longer by twice the
+height change times the sine of the take-off angle:
+
+```
+f = 2 (dh/dt) sin(elevation) / lambda
+```
+
+Overnight that is a few tenths of a metre per second; at dawn and dusk the layer
+can run at several metres a second. On 2200 m that is still a milliHertz or two
+and the trace is drawn as a hair, while the same motion on 30 m is a couple of
+tenths of a Hz and the trace comes out fuzzy and wandering — which is why QRSS30
+and QRSS60 belong on the low bands and QRSS3 is what gets used on HF.
+
+A hop arrives as a **carrier**, not as a diffuse band: the model synthesises each
+mode as one coherent tone with a slowly wandering frequency rather than as
+filtered noise, because that is what a specular reflection is. When the path
+arrives more than one way — two hops, or the two magneto-ionic components — the
+modes sit a few milliHertz apart and **beat**, and that beat is the slow QSB
+every low-band QRSS screen shows. It falls out of the sum; there is no fading
+model behind it. The report gives the period.
+
+`--layer-rate`, `--layer-churn`, `--takeoff` and `--iono-modes` pin what is
+otherwise drawn.
+
+```
+  text      vvv de sq6emm
+  code      ...- ...- ...-  /  -.. .  /  ... --.- -.... . -- --
+  keying    0.40 wpm, dit 3 s, standard spacing
+  tone      600 Hz, drift ±0.020 Hz, hum 6% at 50 Hz
+  path      137.5 kHz, λ 2180.3 m, 0.92 mHz per m/s
+  scatter   skywave, 3 mode(s): Doppler -0.32 mHz tuned out, spread 0.35 mHz, 100% inside the filter
+            — almost clean CW, just a flutter on it
+            layer falling 0.80 m/s at 26° take-off, wandering 0.27 mHz
+            modes 0.22 mHz apart, so it fades every 232 min
+  band      lf-qrss: S/N -12 dB in 200 Hz, QRN 5/s at +28 dB, measured -16.0 dB
+            carrier at +83 Hz, +2 dB
+  qrss      QRSS3: dit 3 s, read in a bin 0.333 Hz wide, +28 dB on the 200 Hz filter
+            so S/N -12 dB in the filter reads +16 dB on the waterfall
+  audio     352.2 s, 8000 Hz, 5503 KB, seed 4
+```
+
+## EME: 2.5 seconds behind you
+
+```bash
+python -m morsefun "vvv de sq6emm" --profile eme-qrss            # 2 m, QRSS3
+python -m morsefun "cq de sq6emm k" --profile eme                # 2 m, 12 wpm
+python -m morsefun "t t t t" --scatter eme --band 432M --echo-test
+python -m morsefun "cq" --scatter eme --band 10G --libration 0.3
+```
+
+`--scatter eme` bounces the signal off the Moon, which is the same kind of thing
+as a rain cell — a population of scatterers, each with its own Doppler — with the
+geometry replaced by a sphere 1738 km across. Patches are spread over the visible
+face and weighted by `cos^n` of the angle from the sub-radar point, because the
+Moon answers from the middle far more than from the edge.
+
+**Libration** is what moves them: the Moon's apparent rotation as seen from the
+station, a couple of degrees a day, one limb coming towards you and the other
+going away. The spread is `2 omega R / lambda`, so it scales straight with the
+band:
+
+| Libration | 144 MHz | 432 MHz | 1296 MHz | 10 GHz |
+| --- | --- | --- | --- | --- |
+| 0.2°/day, a libration minimum | 0.03 Hz | 0.08 Hz | 0.24 Hz | 1.8 Hz |
+| 2.5°/day, an ordinary day | 0.33 Hz | 0.98 Hz | 2.9 Hz | 23 Hz |
+| 8°/day | 1.0 Hz | 3.1 Hz | 9.4 Hz | 73 Hz |
+
+This is why operators wait for libration minimum, and the model says so in the
+arithmetic rather than in a comment: at 0.2°/day a 2 m echo fits inside a QRSS3
+bin and keeps all 30 dB of its processing gain, and at 8°/day it does not.
+
+Three more things the path does, all reported:
+
+* **Delay.** 356 500 km at perigee to 406 700 at apogee, so the echo arrives 2.38
+  to 2.71 s after it was keyed. `--echo-test` (the same as `--rician 6`) mixes
+  your own keying in as well, so you hear it, then hear the Moon answer.
+* **Doppler.** The station is carried around the Earth at up to 465 m/s, which is
+  ±450 Hz on 2 m and ±30 kHz on 10 GHz, and it *changes* by a few hundredths of a
+  Hz per second — tens of Hz across a QRSS message. Rigs track it and so does
+  this; `--no-doppler-track` leaves the ramp in and the trace slopes off its own
+  line. Leave both off on 10 GHz and nothing lands inside the filter at all,
+  which the report will tell you.
+* **Faraday rotation** on VHF: the plane of polarisation turns as the TEC drifts,
+  so the echo fades to nothing and comes back over minutes. It goes as `1/f^2`,
+  so it is 22 dB on 2 m, a couple of dB on 23 cm, and nothing at all on 10 GHz.
+
+Not modelled: the Moon is 11.6 ms deep, so the limb answers later than the
+middle. That smears fast CW and is neither here nor there at QRSS speeds.
+
+```
+  text      vvv de sq6emm
+  code      ...- ...- ...-  /  -.. .  /  ... --.- -.... . -- --
+  keying    0.40 wpm, dit 3 s, standard spacing
+  tone      600 Hz, drift ±0.050 Hz
+  path      144 MHz, λ 2.1 m, 0.96 Hz per m/s
+  scatter   moon at 377,408 km: Doppler +203 Hz tracked out, spread 0.106 Hz, 100% inside the filter
+            — almost clean CW, just a flutter on it
+            the echo is 2.52 s late, libration 0.74° a day, limb 0.248 Hz
+            6000 patches, cos^1.6 across the disc
+            own Doppler +203 Hz, drifting +0.74 mHz a second, both followed
+            Faraday 22 dB nulls every 19 min
+  band      eme-qrss: S/N -6 dB in 300 Hz, QRN 0.2/s at +22 dB
+  qrss      QRSS3: dit 3 s, read in a bin 0.333 Hz wide, +30 dB on the 300 Hz filter
+            so S/N -6 dB in the filter reads +24 dB on the waterfall
+  audio     354.7 s, 8000 Hz, 5543 KB, seed 12
+```
+
 ## Truly random
 
 Every render draws from `np.random.SeedSequence(seed).spawn(...)`: one
@@ -272,12 +431,17 @@ python -m morsefun --list-profiles
 ```
 
 ```
+30m-qrss      30 m QRSS3: the knights' band, fuzzy and wandering
 aurora        aurora on 2 m, where it works: hoarse, bursty, shifted down
 clean         bare tone, no band at all
 contest       a crowded band: four stations and a carrier in a 700 Hz filter
 dry-snow      10 GHz off dry snow: narrow, wind-shifted and very weak
+eme           2 m moonbounce at 12 wpm: hollow, fluttery, 2.5 s behind you
+eme-qrss      2 m EME QRSS3: the echo 2.5 s late, libration and Faraday
 heavy-rain    10 GHz off a downpour: 45 mm/h, loud, wide and attenuated
+lf-qrss       2200 m QRSS3: a trace like a hair, under heavy static
 light-rain    10 GHz off layered rain on a long path: almost clean CW
+mf-qrss       630 m QRSS3: still razor thin, a little more layer motion
 noisy         weak signal, deep QSB, crashes and two other stations
 quiet         good conditions, strong signal, the odd crash
 rain-scatter  10 GHz off a rain cell: a different front every time
@@ -318,9 +482,176 @@ write_wav("cq.wav", result.samples, result.sample_rate)
 print(result.meta["dit_ms"], result.meta["measured_snr_db"])
 ```
 
+Slow modes are the same call with the keying set from a dit length:
+
+```python
+from morsefun import Config, apply_qrss, render
+
+cfg = apply_qrss(Config(scatter="eme", band="144M", snr_db=-6), 3.0)   # QRSS3
+result = render("vvv de sq6emm", cfg)
+print(result.meta["scatter"]["delay_s"])            # the echo, seconds late
+print(result.meta["qrss"]["waterfall_snr_db"])      # what the bin makes of it
+```
+
 `render` returns the float samples plus a `meta` dict with the code, the timing,
 the levels and a note on every station and carrier that was put on the band.
 `--json` prints the same thing from the command line.
+
+## References
+
+Where a number or a curve in this program came from. Each entry says what it is
+actually used for, and the last paragraph says what has no reference at all
+because it is a modelling choice rather than a result.
+
+**Precipitation microphysics**
+
+* J. S. Marshall and W. McK. Palmer, "The distribution of raindrops with size",
+  *Journal of Meteorology*, vol. 5, no. 4, pp. 165–166, 1948. The exponential
+  drop-size distribution `N(D) = N0 exp(-Λ D)` with `Λ = 4.1 R^-0.21` mm⁻¹, and
+  the `Z = 200 R^1.6` reflectivity-rate relation — `drop_diameters` and
+  `reflectivity_dbz` in `morsefun/propagation.py`.
+* D. Atlas, R. C. Srivastava and R. S. Sekhon, "Doppler radar characteristics of
+  precipitation at vertical incidence", *Reviews of Geophysics and Space
+  Physics*, vol. 11, no. 1, pp. 1–35, 1973. The terminal-velocity fit
+  `v = 9.65 - 10.3 exp(-0.6 D)` m/s — `drop_fall_speed`. (Often miscredited,
+  including in an earlier version of this code, to Atlas and Ulbrich, whose 1977
+  fit is the power law `v = 3.78 D^0.67`.)
+* K. L. S. Gunn and J. S. Marshall, "The distribution with size of aggregate
+  snowflakes", *Journal of Meteorology*, vol. 15, pp. 452–461, 1958. Aggregate
+  sizes as melted diameter, in the commonly quoted form `Λ = 25.5 R^-0.48` —
+  `flake_diameters`.
+
+**Radar meteorology**
+
+* R. J. Doviak and D. S. Zrnić, *Doppler Radar and Weather Observations*, 2nd
+  ed., Academic Press, 1993 (Dover reprint, 2006). The contributions to the
+  Doppler spectrum width that this model builds a cell out of — fall-speed
+  dispersion, turbulence, wind shear through the volume and beam broadening —
+  and the bright band.
+* L. J. Battan, *Radar Observation of the Atmosphere*, University of Chicago
+  Press, 1973. The dielectric factor `|K|²` of ice against water, 0.208 against
+  0.93, which is the 6.5 dB that dry snow is down on the same rate of rain —
+  `snow_relative_db`.
+
+**The Moon**
+
+* J. V. Evans and T. Hagfors, *Radar Astronomy*, McGraw-Hill, 1968 (their chapter
+  on radar studies of the Moon). The lunar echo: a quasi-specular return from near
+  the sub-radar point with a diffuse component towards the limb, which is the
+  `cos^n` weighting across the disc, and the libration spreading that follows from
+  the limbs moving at `omega R` -- `moon_doppler` in `morsefun/moon.py`. The
+  perigee and apogee distances, and so the 2.38 to 2.71 s delay, are the usual
+  quoted figures.
+* J. Taylor, K1JT, and the WSJT development group, *WSJT-X User Guide*. How EME
+  Doppler is reckoned and tracked in practice, which is what `--no-doppler-track`
+  turns off, and libration spreading as operators meet it.
+
+**The ionosphere on a low band**
+
+* K. Davies, *Ionospheric Radio*, Peter Peregrinus / IEE, 1990. Doppler from a
+  reflecting layer that is moving, `f = 2 (dh/dt) sin(elevation) / lambda`, and
+  the interference between modes that arrive by different paths -- the whole of
+  `morsefun/skywave.py`.
+
+**QRSS**
+
+* M. Dennison, G3XDV, *LF Today: A Guide to Success on 136 and 500 kHz*, 3rd ed.,
+  RSGB, 2013. What QRSS is for on the low bands, the dit lengths in use, and why
+  the keying has to be shaped.
+* A. di Bene, I2PHD, *Argo*. The waterfall program these traces are actually read
+  in, and the reason the web front end draws a spectrogram at all.
+
+**The bistatic path**
+
+* N. J. Willis, *Bistatic Radar*, Artech House, 1991 (2nd ed., SciTech, 2005).
+  The common volume, the bistatic angle `β`, and the Doppler of a bistatic path
+  as the sum of the closing rates towards the two ends, `2 cos(β/2)` along the
+  bisector — `Geometry` and `cell_doppler` in `morsefun/cell.py`, and
+  `Band.bistatic_doppler_hz`.
+* Recommendation ITU-R P.838-3, *Specific attenuation model for rain for use in
+  prediction methods*, ITU, 2005. The `k` and `α` coefficients for
+  `γ = k R^α` dB/km, horizontal polarisation, 1 to 30 GHz —
+  `rain_attenuation_db_km`.
+
+**The fading channel**
+
+* R. H. Clarke, "A statistical theory of mobile-radio reception", *Bell System
+  Technical Journal*, vol. 47, no. 6, pp. 957–1000, 1968.
+* W. C. Jakes (ed.), *Microwave Mobile Communications*, Wiley, 1974. Between
+  them, the scatter channel this program uses: a sum over many scatterers is a
+  complex Gaussian process whose power spectrum is their Doppler spectrum, so it
+  can be synthesised by colouring complex white noise, and its envelope is
+  Rayleigh distributed — `morsefun/scatter.py`.
+* S. O. Rice, "Statistical properties of a sine wave plus random noise", *Bell
+  System Technical Journal*, vol. 27, no. 1, pp. 109–157, 1948. The Rician
+  mixture of a steady path with a scattered one — `--rician`,
+  `rician_weights`.
+
+**Signal processing**
+
+* R. E. Crochiere, "A weighted overlap-add method of short-time Fourier
+  analysis/synthesis", *IEEE Transactions on Acoustics, Speech and Signal
+  Processing*, vol. 28, no. 1, pp. 99–102, 1980.
+* J. B. Allen and L. R. Rabiner, "A unified approach to short-time Fourier
+  analysis and synthesis", *Proceedings of the IEEE*, vol. 65, no. 11,
+  pp. 1558–1564, 1977. How the spectrum of a cell is allowed to change while the
+  message goes out without a seam at any frame boundary — `evolving_channel`.
+
+**Morse code and the band**
+
+* Recommendation ITU-R M.1677-1, *International Morse code*, ITU, 2009. The code
+  itself and the relative timing: dot 1, dash 3, gap between elements 1, between
+  characters 3, between words 7 — `morsefun/morse.py`.
+* J. Bloom, KE3Z, "A standard for Morse timing using the Farnsworth technique",
+  *QEX*, April 1990, pp. 8–9. The Farnsworth formula
+  `t_a = (60 c - 37.2 s) / (s c)`, split 3:7 between character and word gaps —
+  `Timing._farnsworth_delay`.
+* Recommendation ITU-R P.372, *Radio noise*, ITU. Background for the shape of
+  the noise floor — atmospheric noise rising towards the low end, which is what
+  `--tilt` is — but none of its numbers are used: the floor here is set by
+  `--snr`, not by an absolute noise figure.
+
+**Operating practice on 10 GHz**
+
+Rain scatter as it is actually worked — that it is a mode at all, what a station
+points at, that the return is tuned back onto the operator's own note, and that
+it ranges from a signal with a flutter on it to something as rough as aurora —
+comes from amateur microwave literature rather than from any one paper:
+
+* RSGB, *Microwave Handbook*, ed. M. W. Dixon, G3PFR, vols. 1–3, 1989–1992.
+* ARRL, *The ARRL UHF/Microwave Experimenter's Manual*, 1990.
+* *DUBUS* and *VHF Communications*, whose rain-scatter articles are the running
+  record of the mode.
+
+No figure in the code was taken from these; they are what the model is trying to
+sound like.
+
+**Tools**
+
+* C. R. Harris et al., "Array programming with NumPy", *Nature*, vol. 585,
+  pp. 357–362, 2020. The only dependency.
+
+**What has no reference**
+
+The cell is a model, not a measurement, and these parts of it are chosen rather
+than cited: the character axis from 0 to 1 and everything mapped off it; the
+Gaussian blob standing in for the beams' intersection, including its cigar
+aspect ratio `1/tan(elevation)`; how many cores a front gets and how they are
+placed, breathe and wander; the rates at which a cell rearranges itself; the
+distributions the geometry is drawn from, which are meant to cover the paths
+amateurs actually work rather than any surveyed population; the verdicts in
+`sounds_like`; and the QRN, QRM and heterodyne models, which are there to make
+the band sound busy and are not models of anything in particular.
+
+The same goes for the slow modes. The libration rates are drawn from 0.2 to
+8 degrees a day because that is the range operators talk about, not from an
+ephemeris. The Faraday depth is a rule, 22 dB at 144 MHz falling as `1/f^2`, not
+a TEC model. A skywave mode is rendered as one carrier with a slowly wandering
+frequency rather than as a diffuse band, which is right for a specular reflection
+and wrong in detail. And the QRSS arithmetic uses the conventional rule of thumb
+that a dit of `T` seconds is read in a bin of `1/T` Hz, with the smearing penalty
+taken as `10 log10(spread / bin)` -- near enough for a report, and not a detection
+theory.
 
 ## Layout
 
@@ -330,6 +661,8 @@ morsefun/synth.py     timeline -> keyed tone, with drift, fading and hum
 morsefun/noise.py     noise floor, static crashes, QRM stations, heterodynes
 morsefun/propagation.py  bands, drop and flake distributions, Doppler, ITU-R attenuation
 morsefun/cell.py      the cell: cores, bistatic geometry, and how it all evolves
+morsefun/skywave.py   a low band: coherent hops off a layer that moves
+morsefun/moon.py      EME: libration, the 2.5 second delay, Doppler, Faraday
 morsefun/scatter.py   the Rayleigh scatter channel, fixed or changing as you listen
 morsefun/dsp.py       FFT bandpass, slow random modulation, soft limiter
 morsefun/render.py    the whole chain, levels and the S/N scaling
@@ -342,4 +675,5 @@ morsefun/page.html    that front end's one page
 tests/                timing, S/N accuracy, filtering, determinism, playback, CLI
                       propagation: Doppler, ITU attenuation, Rayleigh statistics
                       cell: bistatic geometry, the draw, the evolving channel
+                      slow: QRSS bins and gain, skywave modes, the lunar echo
 ```
