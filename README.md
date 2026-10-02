@@ -2,7 +2,8 @@
 
 Morse code generator for the microwave bands: type a message, hear it the way it
 would come back off a rain cell at 10 GHz. It writes a WAV file only if you ask
-for one.
+for one, and it will [serve itself as a web page](#live-in-a-browser) if you would
+rather turn the knobs in a browser.
 
 ```bash
 python -m morsefun "cq cq de sq6emm sq6emm k" --wpm 23 --tone 600
@@ -36,6 +37,36 @@ input, so anything that reads a WAV from a pipe will do. Ctrl-C stops playback.
 
 `-o cq.wav` writes a file instead of playing; `-o cq.wav --play` does both.
 
+## Live in a browser
+
+```bash
+docker compose up -d --build        # then open http://<host>:8086
+```
+
+The same renderer behind a small standard-library HTTP server: type a message,
+press **send it**, and the page plays what came back and draws the spectrogram of
+it, so the Doppler spread of the cell can be seen as well as heard. **Another
+front** re-rolls the weather with the same settings, which is the quickest way to
+hear how little two rain scatter signals have in common; every render reports its
+seed, and pinning the seed brings that front back. Every control can be left
+blank, which means *drawn*.
+
+`MORSEFUN_PORT` publishes it somewhere other than 8086. There is nothing to
+install beyond NumPy and nothing is written to disk — the last two dozen renders
+are kept in memory for the player to fetch.
+
+It is meant to sit behind a reverse proxy on a path of its own. Every URL the
+page asks for is relative and routing ignores whatever prefix is left on the
+request, so `https://example/morsefun/` works with or without the proxy
+stripping the prefix. If the mount point has no trailing slash, tell the page
+where it lives — either send `X-Forwarded-Prefix`, or set
+`MORSEFUN_BASE_PATH=/morsefun` (`--base-path`), which puts a `<base>` tag in the
+page:
+
+```bash
+docker run --rm -p 8086:8080 -e MORSEFUN_BASE_PATH=/morsefun morsefun:web
+```
+
 ## Running it
 
 Everything runs in a container; nothing is installed on the host. Playback needs
@@ -48,6 +79,7 @@ docker run --rm --device /dev/snd -v "$PWD":/work -w /work morsefun:dev \
 docker run --rm -v "$PWD":/work -w /work morsefun:dev \
     python -m morsefun "cq cq de sq6emm sq6emm k" -o out/cq.wav
 docker run --rm -v "$PWD":/work -w /work morsefun:dev python -m unittest discover -s tests
+docker run --rm -p 8086:8080 morsefun:dev                  # the web front end
 ```
 
 The only dependency is NumPy; nothing is needed for playback beyond the player
@@ -305,6 +337,8 @@ morsefun/play.py      hands the samples to the system's audio player
 morsefun/profiles.py  named band conditions
 morsefun/cli.py       argument parsing, batch mode, the report
 morsefun/wav.py       16-bit mono PCM in and out, and in memory
+morsefun/web.py       the browser front end: render, WAV, spectrogram, report
+morsefun/page.html    that front end's one page
 tests/                timing, S/N accuracy, filtering, determinism, playback, CLI
                       propagation: Doppler, ITU attenuation, Rayleigh statistics
                       cell: bistatic geometry, the draw, the evolving channel

@@ -1,0 +1,29 @@
+# The web front end: type a message, hear it off a rain cell.
+#
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# Then open http://<this-host>:8086 -- it listens on every interface, so it is
+# reachable from the rest of the network, not just from localhost.  Set
+# MORSEFUN_PORT to publish it somewhere else.
+services:
+  web:
+    build: .
+    image: morsefun:web
+    container_name: morsefun-web
+    labels:
+      owner: claude
+    ports:
+      - "${MORSEFUN_PORT:-8086}:8080"
+    restart: unless-stopped
+    environment:
+      # Only needed when a reverse proxy serves this under a path with no
+      # trailing slash and sends no X-Forwarded-Prefix header.
+      MORSEFUN_BASE_PATH: "${MORSEFUN_BASE_PATH:-}"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/options')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
