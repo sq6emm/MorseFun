@@ -160,7 +160,7 @@ What is sampled inside that volume:
 
 | What | How it is sampled |
 | --- | --- |
-| Rain | Drop sizes from Marshall-Palmer (`N(D) = N0 exp(-4.1 R^-0.21 D)`), fall speeds from Atlas-Ulbrich (`v = 9.65 - 10.3 exp(-0.6 D)` m/s), each drop weighted by `D^6` |
+| Rain | Drop sizes from Marshall-Palmer (`N(D) = N0 exp(-4.1 R^-0.21 D)`), fall speeds from Atlas, Srivastava and Sekhon (`v = 9.65 - 10.3 exp(-0.6 D)` m/s), each drop weighted by `D^6` |
 | Snow | Aggregate sizes from Gunn-Marshall, falling at about a metre a second whatever their size, dry flakes 6.5 dB down on the ice dielectric factor, wet ones brighter than rain |
 | Aurora | Field-aligned E-region irregularities drifting at hundreds of m/s with a turbulent spread, patchy log-normal reflectors, alive only part of the time |
 
@@ -321,6 +321,124 @@ print(result.meta["dit_ms"], result.meta["measured_snr_db"])
 `render` returns the float samples plus a `meta` dict with the code, the timing,
 the levels and a note on every station and carrier that was put on the band.
 `--json` prints the same thing from the command line.
+
+## References
+
+Where a number or a curve in this program came from. Each entry says what it is
+actually used for, and the last paragraph says what has no reference at all
+because it is a modelling choice rather than a result.
+
+**Precipitation microphysics**
+
+* J. S. Marshall and W. McK. Palmer, "The distribution of raindrops with size",
+  *Journal of Meteorology*, vol. 5, no. 4, pp. 165–166, 1948. The exponential
+  drop-size distribution `N(D) = N0 exp(-Λ D)` with `Λ = 4.1 R^-0.21` mm⁻¹, and
+  the `Z = 200 R^1.6` reflectivity-rate relation — `drop_diameters` and
+  `reflectivity_dbz` in `morsefun/propagation.py`.
+* D. Atlas, R. C. Srivastava and R. S. Sekhon, "Doppler radar characteristics of
+  precipitation at vertical incidence", *Reviews of Geophysics and Space
+  Physics*, vol. 11, no. 1, pp. 1–35, 1973. The terminal-velocity fit
+  `v = 9.65 - 10.3 exp(-0.6 D)` m/s — `drop_fall_speed`. (Often miscredited,
+  including in an earlier version of this code, to Atlas and Ulbrich, whose 1977
+  fit is the power law `v = 3.78 D^0.67`.)
+* K. L. S. Gunn and J. S. Marshall, "The distribution with size of aggregate
+  snowflakes", *Journal of Meteorology*, vol. 15, pp. 452–461, 1958. Aggregate
+  sizes as melted diameter, in the commonly quoted form `Λ = 25.5 R^-0.48` —
+  `flake_diameters`.
+
+**Radar meteorology**
+
+* R. J. Doviak and D. S. Zrnić, *Doppler Radar and Weather Observations*, 2nd
+  ed., Academic Press, 1993 (Dover reprint, 2006). The contributions to the
+  Doppler spectrum width that this model builds a cell out of — fall-speed
+  dispersion, turbulence, wind shear through the volume and beam broadening —
+  and the bright band.
+* L. J. Battan, *Radar Observation of the Atmosphere*, University of Chicago
+  Press, 1973. The dielectric factor `|K|²` of ice against water, 0.208 against
+  0.93, which is the 6.5 dB that dry snow is down on the same rate of rain —
+  `snow_relative_db`.
+
+**The bistatic path**
+
+* N. J. Willis, *Bistatic Radar*, Artech House, 1991 (2nd ed., SciTech, 2005).
+  The common volume, the bistatic angle `β`, and the Doppler of a bistatic path
+  as the sum of the closing rates towards the two ends, `2 cos(β/2)` along the
+  bisector — `Geometry` and `cell_doppler` in `morsefun/cell.py`, and
+  `Band.bistatic_doppler_hz`.
+* Recommendation ITU-R P.838-3, *Specific attenuation model for rain for use in
+  prediction methods*, ITU, 2005. The `k` and `α` coefficients for
+  `γ = k R^α` dB/km, horizontal polarisation, 1 to 30 GHz —
+  `rain_attenuation_db_km`.
+
+**The fading channel**
+
+* R. H. Clarke, "A statistical theory of mobile-radio reception", *Bell System
+  Technical Journal*, vol. 47, no. 6, pp. 957–1000, 1968.
+* W. C. Jakes (ed.), *Microwave Mobile Communications*, Wiley, 1974. Between
+  them, the scatter channel this program uses: a sum over many scatterers is a
+  complex Gaussian process whose power spectrum is their Doppler spectrum, so it
+  can be synthesised by colouring complex white noise, and its envelope is
+  Rayleigh distributed — `morsefun/scatter.py`.
+* S. O. Rice, "Statistical properties of a sine wave plus random noise", *Bell
+  System Technical Journal*, vol. 27, no. 1, pp. 109–157, 1948. The Rician
+  mixture of a steady path with a scattered one — `--rician`,
+  `rician_weights`.
+
+**Signal processing**
+
+* R. E. Crochiere, "A weighted overlap-add method of short-time Fourier
+  analysis/synthesis", *IEEE Transactions on Acoustics, Speech and Signal
+  Processing*, vol. 28, no. 1, pp. 99–102, 1980.
+* J. B. Allen and L. R. Rabiner, "A unified approach to short-time Fourier
+  analysis and synthesis", *Proceedings of the IEEE*, vol. 65, no. 11,
+  pp. 1558–1564, 1977. How the spectrum of a cell is allowed to change while the
+  message goes out without a seam at any frame boundary — `evolving_channel`.
+
+**Morse code and the band**
+
+* Recommendation ITU-R M.1677-1, *International Morse code*, ITU, 2009. The code
+  itself and the relative timing: dot 1, dash 3, gap between elements 1, between
+  characters 3, between words 7 — `morsefun/morse.py`.
+* J. Bloom, KE3Z, "A standard for Morse timing using the Farnsworth technique",
+  *QEX*, April 1990, pp. 8–9. The Farnsworth formula
+  `t_a = (60 c - 37.2 s) / (s c)`, split 3:7 between character and word gaps —
+  `Timing._farnsworth_delay`.
+* Recommendation ITU-R P.372, *Radio noise*, ITU. Background for the shape of
+  the noise floor — atmospheric noise rising towards the low end, which is what
+  `--tilt` is — but none of its numbers are used: the floor here is set by
+  `--snr`, not by an absolute noise figure.
+
+**Operating practice on 10 GHz**
+
+Rain scatter as it is actually worked — that it is a mode at all, what a station
+points at, that the return is tuned back onto the operator's own note, and that
+it ranges from a signal with a flutter on it to something as rough as aurora —
+comes from amateur microwave literature rather than from any one paper:
+
+* RSGB, *Microwave Handbook*, ed. M. W. Dixon, G3PFR, vols. 1–3, 1989–1992.
+* ARRL, *The ARRL UHF/Microwave Experimenter's Manual*, 1990.
+* *DUBUS* and *VHF Communications*, whose rain-scatter articles are the running
+  record of the mode.
+
+No figure in the code was taken from these; they are what the model is trying to
+sound like.
+
+**Tools**
+
+* C. R. Harris et al., "Array programming with NumPy", *Nature*, vol. 585,
+  pp. 357–362, 2020. The only dependency.
+
+**What has no reference**
+
+The cell is a model, not a measurement, and these parts of it are chosen rather
+than cited: the character axis from 0 to 1 and everything mapped off it; the
+Gaussian blob standing in for the beams' intersection, including its cigar
+aspect ratio `1/tan(elevation)`; how many cores a front gets and how they are
+placed, breathe and wander; the rates at which a cell rearranges itself; the
+distributions the geometry is drawn from, which are meant to cover the paths
+amateurs actually work rather than any surveyed population; the verdicts in
+`sounds_like`; and the QRN, QRM and heterodyne models, which are there to make
+the band sound busy and are not models of anything in particular.
 
 ## Layout
 

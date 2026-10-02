@@ -62,7 +62,7 @@ class TestPopulations(unittest.TestCase):
         heavy = drop_diameters(50.0, 20_000, self.rng())
         self.assertLess(light.mean(), heavy.mean())
         self.assertLess(drop_fall_speed(light).mean(), drop_fall_speed(heavy).mean())
-        # Atlas-Ulbrich: a 2 mm drop falls at 6.5 m/s.
+        # Atlas, Srivastava and Sekhon: a 2 mm drop falls at 6.5 m/s.
         self.assertAlmostEqual(float(drop_fall_speed(np.array([2.0]))[0]), 6.55, delta=0.1)
 
     def test_drops_are_sampled_not_fixed(self):
