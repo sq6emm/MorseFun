@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = [
+    "fast_length",
     "rms",
     "db_to_amp",
     "amp_to_db",
@@ -16,6 +17,28 @@ __all__ = [
     "smooth_noise",
     "soft_limit",
 ]
+
+
+def fast_length(n: int) -> int:
+    """The smallest length at least ``n`` that the FFT is quick about.
+
+    Lengths with a big prime factor cost several times more than neighbouring
+    ones built from 2s, 3s and 5s, and a render is nothing but transforms over
+    its whole length.  Rounding up buys that back for a few samples of silence.
+    """
+    target = max(int(n), 1)
+    best = 1 << int(np.ceil(np.log2(target)))     # a power of two always works
+    five = 1
+    while five < best:
+        three = five
+        while three < best:
+            candidate = three
+            while candidate < target:
+                candidate *= 2
+            best = min(best, candidate)
+            three *= 3
+        five *= 5
+    return int(best)
 
 
 def rms(x: np.ndarray) -> float:

@@ -10,6 +10,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from .cell import parse_character
 from .play import PlaybackError, describe_players, find_player, play
 from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, PROFILES
 from .render import Config, Render, render
@@ -56,6 +57,17 @@ OVERRIDES = {
     "rain_rate": "rain_rate",
     "snow_rate": "snow_rate",
     "snow_wet": "snow_wet",
+    "cell": "cell_character",
+    "cores": "cores",
+    "updraft": "updraft_mps",
+    "shear": "shear_mps_km",
+    "squint": "squint_deg",
+    "beamwidth": "beamwidth_deg",
+    "height": "height_km",
+    "depth": "depth_km",
+    "evolve": "evolve",
+    "evolve_rate": "evolve_rate_hz",
+    "qrm_scatter": "qrm_scatter",
     "aurora_drift": "aurora_drift_mps",
     "aurora_spread": "aurora_spread_mps",
     "aurora_toward": "aurora_toward",
@@ -109,8 +121,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     w = p.add_argument_group(
         "propagation",
-        "scatter off the weather. Doppler is 2v/lambda, so at 10 GHz one metre "
-        "per second is 67 Hz: this is what turns a tone into a hiss.")
+        "scatter off the weather. Scattering is bistatic, so what is heard is "
+        "the motion along the bisector of the two paths -- straight up for a "
+        "symmetric path, which is why rain scatter is mostly the sound of air "
+        "and drops going up and down, scaled by the elevation. Everything here "
+        "is drawn fresh for every render unless you pin it, so no two clouds "
+        "are alike; --seed brings one back.")
     w.add_argument("--band", metavar="FREQ",
                    help="operating frequency: 10G, 10.368GHz, 1296, 144M, 3cm (default: 10G)")
     w.add_argument("--scatter", choices=("none", "rain", "snow", "aurora"),
@@ -120,8 +136,32 @@ def build_parser() -> argparse.ArgumentParser:
                    help="snowfall, water equivalent (default: 4)")
     w.add_argument("--snow-wet", action="store_true", default=None,
                    help="melting snow: the radar bright band, far stronger than dry")
+    w.add_argument("--cell", type=parse_character, metavar="KIND",
+                   help="cell character: auto (default), stratiform, showers, "
+                        "convective, storm, or a number 0..1")
+    w.add_argument("--cores", type=int, metavar="N",
+                   help="scattering centres in the volume, 1 to 4 (default: drawn)")
+    w.add_argument("--updraft", type=float, metavar="MPS",
+                   help="bulk vertical motion in the cores; this is what shifts the note")
+    w.add_argument("--shear", type=float, metavar="MPS_KM",
+                   help="how much the wind changes through the volume")
     w.add_argument("--elevation", type=float, metavar="DEG",
-                   help="elevation of the common volume (default: 8)")
+                   help="elevation of the common volume from this end (default: drawn)")
+    w.add_argument("--squint", type=float, metavar="DEG",
+                   help="how far the cell sits off the line between the stations")
+    w.add_argument("--beamwidth", type=float, metavar="DEG",
+                   help="antenna beamwidth, so how big the shared volume is")
+    w.add_argument("--height", type=float, metavar="KM",
+                   help="height of the common volume (default: drawn)")
+    w.add_argument("--depth", type=float, metavar="KM",
+                   help="how deep a slice of weather is sampled")
+    w.add_argument("--evolve-rate", type=float, metavar="HZ",
+                   help="how fast the cell rearranges itself while you listen")
+    w.add_argument("--no-evolve", dest="evolve", action="store_false", default=None,
+                   help="hold the cell still: one fixed spectrum for the whole message")
+    w.add_argument("--no-qrm-scatter", dest="qrm_scatter", action="store_false",
+                   default=None,
+                   help="other stations come in direct instead of off their own cell")
     w.add_argument("--wind", type=float, metavar="MPS", help="wind through the volume")
     w.add_argument("--wind-azimuth", type=float, metavar="DEG",
                    help="wind direction (default: drawn at random each render)")
@@ -212,6 +252,99 @@ def slug(text: str, limit: int = 48) -> str:
     return (out[:limit].rstrip("-") or "morse")
 
 
+def wrap(label: str, parts: list[str], indent: str = "            ",
+         width: int = 86) -> list[str]:
+    """One report line, continued on the next if the facts do not fit."""
+    lines: list[str] = []
+    current = label
+    for part in parts:
+        candidate = current + ("" if current.endswith(" ") or not current.strip()
+                               else ", ") + part
+        if len(candidate) > width and current.strip():
+            lines.append(current)
+            current = indent + part
+        else:
+            current = candidate
+    if current.strip():
+        lines.append(current)
+    return lines
+
+
+def describe_scatter(meta: dict, scatter: dict) -> list[str]:
+    """The propagation half of the report: the path, the cloud, the verdict."""
+    lines = [f"  path      {meta['band']}, \u03bb {meta['wavelength_mm']:.1f} mm, "
+             f"{meta['hz_per_mps']:.0f} Hz per m/s"]
+    geometry = scatter.get("geometry")
+    if geometry:
+        volume = "\u00d7".join(f"{v:g}" for v in geometry["volume_km"])
+        lines.extend(wrap("            geometry  ", [
+            f"{geometry['elevation_deg']:.1f}\u00b0 this end and "
+            f"{geometry['far_elevation_deg']:.1f}\u00b0 the other",
+            f"{geometry['squint_deg']:.0f}\u00b0 off the path",
+            f"volume {geometry['height_km']:.1f} km up, {volume} km",
+            f"bistatic {geometry['bistatic_deg']:.0f}\u00b0",
+            f"so {geometry['sensitivity']:.2f} of any motion is heard",
+            f"stations {geometry['baseline_km']:.0f} km apart",
+        ]))
+
+    head = f"{scatter.get('cell', '')} {scatter['kind']}".strip()
+    if "rate_mm_h" in scatter:
+        head += f" {scatter['rate_mm_h']:.3g} mm/h, {scatter['dbz']:.0f} dBZ"
+    tuned = scatter.get("tuned_out_hz") or 0.0
+    doppler = (f"Doppler {tuned:+.0f} Hz tuned out" if tuned
+               else f"Doppler {scatter['shift_hz']:+.0f} Hz")
+    lines.append(f"  scatter   {head}: {doppler}, spread "
+                 f"{scatter['spread_hz']:.0f} Hz, "
+                 f"{scatter['audible_fraction'] * 100:.0f}% inside the filter")
+    if scatter.get("sounds_like"):
+        lines.append(f"            \u2014 {scatter['sounds_like']}")
+
+    cores = scatter.get("cores") or []
+    if len(cores) > 1:
+        detail = [f"{c['shift_hz']:+.0f} Hz/{c['spread_hz']:.0f} Hz "
+                  f"at {c['level_db']:+.0f} dB" for c in cores]
+        lines.extend(wrap(f"            {len(cores)} cores  ", detail))
+
+    sampled = [f"{scatter['scatterers']} scatterers"]
+    if "median_drop_mm" in scatter:
+        sampled.append(f"median drop {scatter['median_drop_mm']:.1f} mm")
+    if "median_melted_mm" in scatter:
+        sampled.append(f"median flake {scatter['median_melted_mm']:.1f} mm melted")
+    if "updraft_mps" in scatter:
+        sampled.append(f"lift {scatter['updraft_mps']:+.1f} m/s "
+                       f"\u00b1{scatter.get('lift_gradient_mps_km', 0.0):.1f} per km")
+        sampled.append(f"turbulence {scatter['turbulence_mps']:.1f} m/s")
+    if "wind_mps" in scatter:
+        sampled.append(f"wind {scatter['wind_mps']:.0f} m/s from "
+                       f"{scatter['wind_azimuth_deg']:.0f}\u00b0 "
+                       f"({scatter['wind_along_mps']:+.1f} m/s along the bisector)")
+        sampled.append(f"shear {scatter['shear_mps_km']:.0f} m/s per km")
+    if scatter.get("evolving"):
+        sampled.append(f"rearranging every {1.0 / max(scatter['evolve_rate_hz'], 1e-3):.1f} s")
+    elif "evolve_rate_hz" in scatter:
+        sampled.append("held still")
+    if scatter.get("scintillation_db"):
+        sampled.append(f"QSB {scatter['scintillation_db']:.0f} dB on top")
+    if scatter.get("from_physics") is False:
+        sampled.append("Doppler set by hand")
+    lines.extend(wrap("            ", sampled))
+
+    budget = []
+    if scatter.get("level_offset_db"):
+        budget.append(f"reflectivity {scatter['level_offset_db']:+.1f} dB")
+    if scatter.get("filter_loss_db", 0.0) < -0.5:
+        budget.append(f"outside the filter {scatter['filter_loss_db']:+.1f} dB")
+    if budget:
+        lines.append("            on the signal: " + ", ".join(budget))
+    if scatter.get("attenuation_db"):
+        lines.append("            on the way: path attenuation "
+                     f"-{scatter['attenuation_db']:.1f} dB")
+    if scatter["audible_fraction"] < 0.05:
+        lines.append("            nothing survives the filter at this band "
+                     "\u2014 try --band 144M, or --doppler-spread")
+    return lines
+
+
 def describe(result: Render, heading: str, profile: str) -> str:
     m = result.meta
     lines = [heading]
@@ -234,41 +367,7 @@ def describe(result: Render, heading: str, profile: str) -> str:
 
     scatter = m.get("scatter") or {}
     if scatter:
-        lam = m["wavelength_mm"]
-        lines.append(f"  path      {m['band']}, \u03bb {lam:.1f} mm, "
-                     f"{m['hz_per_mps']:.0f} Hz per m/s")
-        head = scatter["kind"]
-        if "rate_mm_h" in scatter:
-            head += f" {scatter['rate_mm_h']:.3g} mm/h, {scatter['dbz']:.0f} dBZ"
-        tuned = scatter.get("tuned_out_hz") or 0.0
-        doppler = (f"Doppler {tuned:+.0f} Hz tuned out" if tuned
-                   else f"Doppler {scatter['shift_hz']:+.0f} Hz")
-        lines.append(f"  scatter   {head}: {doppler}, spread "
-                     f"{scatter['spread_hz']:.0f} Hz, "
-                     f"{scatter['audible_fraction'] * 100:.0f}% inside the filter")
-        detail = [f"{scatter['scatterers']} scatterers"]
-        if "median_drop_mm" in scatter:
-            detail.append(f"median drop {scatter['median_drop_mm']:.1f} mm")
-        if "median_melted_mm" in scatter:
-            detail.append(f"median flake {scatter['median_melted_mm']:.1f} mm melted")
-        if "wind_azimuth_deg" in scatter:
-            detail.append(f"wind {scatter['wind_radial_mps']:+.1f} m/s radial "
-                          f"from {scatter['wind_azimuth_deg']:.0f}\u00b0")
-        if scatter.get("from_physics") is False:
-            detail.append("Doppler set by hand")
-        lines.append("            " + ", ".join(detail))
-        budget = []
-        if scatter.get("level_offset_db"):
-            budget.append(f"reflectivity {scatter['level_offset_db']:+.1f} dB")
-        if scatter.get("filter_loss_db", 0.0) < -0.5:
-            budget.append(f"outside the filter {scatter['filter_loss_db']:+.1f} dB")
-        if budget:
-            lines.append("            on the signal: " + ", ".join(budget))
-        if scatter.get("attenuation_db"):
-            lines.append(f"            path attenuation {scatter['attenuation_db']:.1f} dB")
-        if scatter["audible_fraction"] < 0.05:
-            lines.append("            nothing survives the filter at this band "
-                         "\u2014 try --band 144M, or --doppler-spread")
+        lines.extend(describe_scatter(m, scatter))
 
     if m["snr_db"] is None:
         lines.append(f"  band      {profile}: no noise")

@@ -33,14 +33,31 @@ PROFILES: dict[str, dict[str, object]] = {
         "qsb_db": 8.0, "drift_hz": 1.0,
     },
     "rain-scatter": {
-        "scatter": "rain", "band": "10G", "rain_rate": 12.0, "snr_db": 10.0,
-        "crash_rate": 0.1, "qrm_count": 0, "qsb_db": 2.0, "drift_hz": 1.0,
+        # Nothing about the cloud is pinned: every render is a different front,
+        # which is the whole point of the mode.
+        "scatter": "rain", "band": "10G", "snr_db": 10.0,
+        "crash_rate": 0.1, "qrm_count": 1, "qsb_db": 2.0, "drift_hz": 1.0,
         "path_km": 6.0,
+    },
+    "light-rain": {
+        # A long, symmetric path on a quiet day: the bisector points straight up
+        # and there is almost nothing moving along it.
+        "scatter": "rain", "band": "10G", "cell_character": 0.10,
+        # Layered rain is 14 dB down on the 12 mm/h yardstick, so this only
+        # works at all between two strong stations.
+        "elevation_deg": 2.5, "squint_deg": 2.0, "wind_mps": 6.0,
+        "snr_db": 24.0, "crash_rate": 0.05,
+        "qrm_count": 0, "qsb_db": 1.0, "drift_hz": 0.8, "path_km": 4.0,
     },
     "heavy-rain": {
         "scatter": "rain", "band": "10G", "rain_rate": 45.0, "snr_db": 10.0,
         "crash_rate": 1.2, "qrm_count": 0, "qsb_db": 2.0, "drift_hz": 1.0,
-        "turbulence_mps": 4.0, "path_km": 10.0,
+        "turbulence_mps": 4.0, "path_km": 8.0,
+    },
+    "storm-front": {
+        "scatter": "rain", "band": "10G", "cell_character": 0.95, "cores": 4,
+        "elevation_deg": 14.0, "snr_db": 8.0, "crash_rate": 3.0, "crash_db": 24.0,
+        "qrm_count": 1, "qsb_db": 2.0, "drift_hz": 1.0, "path_km": 5.0,
     },
     "dry-snow": {
         "scatter": "snow", "band": "10G", "snow_rate": 4.0, "snr_db": 10.0,
@@ -72,7 +89,9 @@ DESCRIPTIONS: dict[str, str] = {
     "contest": "a crowded band: four stations and a carrier in a 700 Hz filter",
     "thunderstorm": "heavy static, crashes several times a second",
     "worn-rig": "clean band, drifting VFO and mains hum on the carrier",
-    "rain-scatter": "10 GHz off a rain cell: 12 mm/h, hissy and spread ~140 Hz",
+    "rain-scatter": "10 GHz off a rain cell: a different front every time",
+    "light-rain": "10 GHz off layered rain on a long path: almost clean CW",
+    "storm-front": "10 GHz into a storm: four cores, lift, shear, aurora-like",
     "heavy-rain": "10 GHz off a downpour: 45 mm/h, loud, wide and attenuated",
     "dry-snow": "10 GHz off dry snow: narrow, wind-shifted and very weak",
     "wet-snow": "10 GHz off the melting layer: the bright band, much stronger",

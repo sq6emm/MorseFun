@@ -1,16 +1,16 @@
 """One call from text to samples: keying, propagation, band conditions, levels.
 
 The chain mirrors a station on the air.  The wanted signal is keyed, optionally
-scattered off rain, snow or an auroral curtain, and attenuated by the weather it
-went through; everything else on the band is generated separately; both go
-through the same IF filter; the noise bus is scaled to hit the requested
-signal-to-noise ratio in that bandwidth; and the sum passes a soft limiter the
-way an AGC rounds off a static crash.
+scattered off a rain cell, falling snow or an auroral curtain, and attenuated by
+the weather it went through; everything else on the band is generated
+separately; both go through the same IF filter; the noise bus is scaled to hit
+the requested signal-to-noise ratio in that bandwidth; and the sum passes a soft
+limiter the way an AGC rounds off a static crash.
 
 Each random part of the render draws from its own independent stream, spawned
 from the seed, so turning one effect on does not reshuffle any of the others.
 With no seed given the entropy comes from the OS, and the seed that was used is
-reported so any band can be heard again.
+reported so any band -- and any cloud -- can be heard again.
 """
 
 from __future__ import annotations
@@ -19,19 +19,24 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
-from .dsp import bandpass, db_to_amp, rms, soft_limit
+from .cell import (Cell, cell_doppler, draw_cell, evolution, parse_character,
+                   sounds_like)
+from .dsp import bandpass, db_to_amp, fast_length, rms, soft_limit
 from .morse import Timing, duration, parse, timeline, to_code
 from .noise import NoiseSpec, build_noise
-from .propagation import (REFERENCE_RATE_MM_H, AuroraSpec, Band, RainSpec, SnowSpec,
-                          aurora_doppler, parse_band, rain_doppler, reflectivity_dbz,
-                          snow_doppler)
-from .scatter import (ScatterSpec, activity_gate, apply_channel, audible_fraction,
-                      channel, doppler_spectrum, rician_weights, scintillate)
+from .propagation import (REFERENCE_RATE_MM_H, AuroraSpec, Band, aurora_doppler,
+                          parse_band, reflectivity_dbz)
+from .scatter import (EvolvingSpectrum, ScatterSpec, activity_gate, apply_channel,
+                      audible_fraction, block_size, channel, doppler_spectrum,
+                      evolving_channel, frame_count, rician_weights, scintillate)
 from .synth import ToneSpec, keyed_tone
 
 #: Every random stream in a render, in a fixed order, so a given seed always
 #: hands the same numbers to the same part of the chain.
 STREAMS = ("signal", "weather", "scatter", "floor", "crashes", "qrm", "birdies")
+
+#: The modes that are a volume of weather with cores in it.
+WEATHER_MODES = ("rain", "snow")
 
 
 def streams(seed: int | None) -> dict[str, np.random.Generator]:
@@ -42,7 +47,12 @@ def streams(seed: int | None) -> dict[str, np.random.Generator]:
 
 @dataclass
 class Config:
-    """Every knob, flat, so the CLI can map onto it one for one."""
+    """Every knob, flat, so the CLI can map onto it one for one.
+
+    Most of the weather is ``None`` by default, which does not mean *off*: it
+    means *drawn*.  Give a number and that number is kept; leave it alone and
+    every render sees a different cloud.
+    """
 
     # keying
     wpm: float = 23.0
@@ -61,20 +71,34 @@ class Config:
     scatter: str = "none"           # none | rain | snow | aurora
     rician_db: float = -99.0        # direct-to-scattered ratio; -99 is pure scatter
     retune: bool = True             # tune the scattered signal back onto the note
-    scintillation_db: float = 0.0
-    scintillation_rate: float = 0.3
+    scintillation_db: float | None = None   # None: whatever the cell deserves
+    scintillation_rate: float | None = None
     doppler_shift_hz: float | None = None   # override the physics, audio Hz
     doppler_spread_hz: float | None = None
     scatterers: int = 6000
-    elevation_deg: float = 8.0
-    wind_mps: float | None = None        # None: the weather's own default
-    wind_azimuth_deg: float | None = None
-    turbulence_mps: float | None = None  # None: convective for rain, calm for snow
-    path_km: float = 0.0
     weather_level: bool = True           # let reflectivity set the signal strength
-    rain_rate: float = 12.0
-    snow_rate: float = 4.0
+    path_km: float = 0.0                 # weather along the path, for attenuation
+    # the cell, all drawn unless pinned
+    cell_character: float | str | None = None   # 0 stratiform .. 1 deep convective
+    cores: int | None = None             # scattering centres in the volume
+    rain_rate: float | None = None       # mm/h
+    snow_rate: float | None = None       # mm/h water equivalent
     snow_wet: bool = False
+    updraft_mps: float | None = None     # bulk vertical motion in the cores
+    turbulence_mps: float | None = None  # velocity spread inside them
+    shear_mps_km: float | None = None    # wind change through the volume
+    wind_mps: float | None = None
+    wind_azimuth_deg: float | None = None
+    # the geometry both ends see it with
+    elevation_deg: float | None = None
+    squint_deg: float | None = None       # cell off the line between the stations
+    beamwidth_deg: float | None = None
+    height_km: float | None = None
+    depth_km: float | None = None
+    evolve: bool = True                   # let the cell change while you listen
+    evolve_rate_hz: float | None = None
+    qrm_scatter: bool = True              # the neighbours are on the same cell
+    # aurora
     aurora_drift_mps: float = 600.0
     aurora_spread_mps: float = 200.0
     aurora_toward: bool = False
@@ -127,8 +151,8 @@ class Config:
         return ScatterSpec(
             mode=self.scatter,
             rician_db=self.rician_db,
-            scintillation_db=self.scintillation_db,
-            scintillation_rate=self.scintillation_rate,
+            scintillation_db=self.scintillation_db or 0.0,
+            scintillation_rate=self.scintillation_rate or 0.3,
             retune=self.retune,
         )
 
@@ -149,61 +173,131 @@ class Render:
         return self.samples.size / self.sample_rate
 
 
-def _scatterers(cfg: Config, band: Band, rng: np.random.Generator):
-    """Sample the scattering volume for the configured mode."""
-    mode = (cfg.scatter or "none").lower()
-    weather = {}
-    if cfg.wind_mps is not None:
-        weather["wind_mps"] = cfg.wind_mps
-    if cfg.turbulence_mps is not None:
-        weather["turbulence_mps"] = cfg.turbulence_mps
-    if mode == "rain":
-        return rain_doppler(RainSpec(
-            rate_mm_h=cfg.rain_rate, elevation_deg=cfg.elevation_deg,
-            wind_azimuth_deg=cfg.wind_azimuth_deg, path_km=cfg.path_km,
-            drops=cfg.scatterers, **weather), band, rng)
-    if mode == "snow":
-        return snow_doppler(SnowSpec(
-            rate_mm_h=cfg.snow_rate, wet=cfg.snow_wet,
-            elevation_deg=cfg.elevation_deg,
-            wind_azimuth_deg=cfg.wind_azimuth_deg, path_km=cfg.path_km,
-            flakes=cfg.scatterers, **weather), band, rng)
-    if mode == "aurora":
-        return aurora_doppler(AuroraSpec(
-            drift_mps=cfg.aurora_drift_mps, drift_spread_mps=cfg.aurora_spread_mps,
-            toward=cfg.aurora_toward, activity=cfg.aurora_activity,
-            burst_s=cfg.aurora_burst_s, shift_hz=cfg.doppler_shift_hz,
-            spread_hz=cfg.doppler_spread_hz, cells=cfg.scatterers), band, rng)
-    raise ValueError(f"unknown scatter mode: {cfg.scatter!r}")
+def draw_weather(cfg: Config, mode: str, rng: np.random.Generator,
+                 character: float | None = None, rate_mm_h: float | None = None) -> Cell:
+    """Draw the cell this render listens to, keeping whatever was pinned."""
+    if character is None:
+        character = parse_character(cfg.cell_character)
+    if rate_mm_h is None:
+        rate_mm_h = cfg.rain_rate if mode == "rain" else cfg.snow_rate
+    return draw_cell(
+        rng, kind=mode,
+        character=character,
+        rate_mm_h=rate_mm_h,
+        cores=cfg.cores,
+        updraft_mps=cfg.updraft_mps,
+        turbulence_mps=cfg.turbulence_mps,
+        shear_mps_km=cfg.shear_mps_km,
+        wind_mps=cfg.wind_mps,
+        wind_azimuth_deg=cfg.wind_azimuth_deg,
+        elevation_deg=cfg.elevation_deg,
+        squint_deg=cfg.squint_deg,
+        beamwidth_deg=cfg.beamwidth_deg,
+        height_km=cfg.height_km,
+        depth_km=cfg.depth_km,
+        evolve_rate_hz=cfg.evolve_rate_hz,
+        scintillation_db=cfg.scintillation_db,
+        wet=cfg.snow_wet,
+    )
 
 
-def _scattered_path(cfg: Config, env: np.ndarray, band: Band,
-                    rngs: dict[str, np.random.Generator]):
-    """Build the scattered copy of the signal.  Returns ``(audio, info)``."""
-    samples, weights, info = _scatterers(cfg, band, rngs["weather"])
-    grid, psd = doppler_spectrum(samples, weights)
+def _weather_path(cfg: Config, env: np.ndarray, band: Band, mode: str,
+                  rngs: dict[str, np.random.Generator]):
+    """Scatter off a cell that has cores, a shape, and somewhere to be."""
+    cell = draw_weather(cfg, mode, rngs["weather"])
+    samples, info = cell_doppler(
+        cell, band, rngs["weather"], scatterers=cfg.scatterers, path_km=cfg.path_km)
+
+    # A narrow spectrum needs a long analysis block to resolve it, and can
+    # afford one: a cell that narrow is a cell that changes slowly anyway.
+    block = block_size(info["spread_hz"], cfg.sample_rate, env.size)
+    hop = block // 2
+    components = evolution(
+        cell, samples, frame_count(env.size, block), hop / cfg.sample_rate,
+        rngs["weather"], evolve=cfg.evolve)
+    spectrum = EvolvingSpectrum(components)
+
+    # What is quoted is the spectrum averaged over the whole message, wander and
+    # all, because that is what the ear integrates.
+    shift, spread = spectrum.moments()
+    info["still_spread_hz"] = info["spread_hz"]
+    info["shift_hz"], info["spread_hz"] = shift, spread
+    info["tuned_out_hz"] = 0.0
+    if cfg.retune:
+        info["tuned_out_hz"] = shift
+        spectrum.retune(-shift)
+    info["audible_fraction"] = audible_fraction(
+        spectrum.grid, spectrum.mean_psd(), cfg.freq, cfg.bandwidth, cfg.sample_rate)
+    info["evolving"] = bool(cfg.evolve)
+    info["frame_ms"] = 1000.0 * hop / cfg.sample_rate
+    info["sounds_like"] = sounds_like(spread, float(info["audible_fraction"]))
+
+    process = evolving_channel(
+        env.size, cfg.sample_rate, spectrum, cfg.freq, rngs["scatter"], block)
+
+    depth = cell.scintillation_db if cfg.scintillation_db is None else cfg.scintillation_db
+    rate = (cell.scintillation_rate_hz if cfg.scintillation_rate is None
+            else cfg.scintillation_rate)
+    info["scintillation_db"] = float(depth)
+    if depth > 0:
+        process = process * scintillate(
+            env.size, cfg.sample_rate, rngs["scatter"], float(depth), float(rate))
+
+    return apply_channel(env, cfg.freq, cfg.sample_rate, process), info, cell
+
+
+def _aurora_path(cfg: Config, env: np.ndarray, band: Band,
+                 rngs: dict[str, np.random.Generator]):
+    """Scatter off an auroral curtain: one spectrum, and a gate that opens."""
+    freqs, weights, info = aurora_doppler(AuroraSpec(
+        drift_mps=cfg.aurora_drift_mps, drift_spread_mps=cfg.aurora_spread_mps,
+        toward=cfg.aurora_toward, activity=cfg.aurora_activity,
+        burst_s=cfg.aurora_burst_s, shift_hz=cfg.doppler_shift_hz,
+        spread_hz=cfg.doppler_spread_hz, cells=cfg.scatterers), band, rngs["weather"])
+    grid, psd = doppler_spectrum(freqs, weights)
 
     info["tuned_out_hz"] = 0.0
     if cfg.retune:
-        # An operator tunes the return onto their own note; the spread stays.
         info["tuned_out_hz"] = info["shift_hz"]
         grid = grid - info["shift_hz"]
-
     info["audible_fraction"] = audible_fraction(
         grid, psd, cfg.freq, cfg.bandwidth, cfg.sample_rate)
+    info["sounds_like"] = sounds_like(
+        float(info["spread_hz"]), float(info["audible_fraction"]))
+
     process = channel(env.size, cfg.sample_rate, grid, psd, cfg.freq, rngs["scatter"])
-
-    if info["kind"] == "aurora":
-        process = process * activity_gate(
-            env.size, cfg.sample_rate, rngs["scatter"],
-            cfg.aurora_activity, cfg.aurora_burst_s)
-    if cfg.scintillation_db > 0:
+    process = process * activity_gate(
+        env.size, cfg.sample_rate, rngs["scatter"], cfg.aurora_activity, cfg.aurora_burst_s)
+    depth = 0.0 if cfg.scintillation_db is None else float(cfg.scintillation_db)
+    info["scintillation_db"] = depth
+    if depth > 0:
         process = process * scintillate(
-            env.size, cfg.sample_rate, rngs["scatter"],
-            cfg.scintillation_db, cfg.scintillation_rate)
+            env.size, cfg.sample_rate, rngs["scatter"], depth,
+            float(cfg.scintillation_rate or 0.3))
+    return apply_channel(env, cfg.freq, cfg.sample_rate, process), info
 
-    audio = apply_channel(env, cfg.freq, cfg.sample_rate, process)
-    return audio, info
+
+def _station_scatter(cfg: Config, band: Band, cell: Cell, mode: str):
+    """Scatter the other stations too -- same front, their own path into it.
+
+    This is why no two stations on rain scatter sound alike.  They are working
+    the same cell, so its character and its rain rate carry over, but each one
+    looks into it from somewhere else: its own elevation, its own corner of the
+    cloud, its own cores.  One is a clean note, the next is a rasp.
+    """
+    def apply(env: np.ndarray, freq: float, rng: np.random.Generator):
+        other = draw_weather(cfg, mode, rng, character=cell.character,
+                             rate_mm_h=cell.rate_mm_h)
+        samples, info = cell_doppler(
+            other, band, rng, scatterers=min(cfg.scatterers, 2400))
+        freqs = np.concatenate([s.freqs for s in samples])
+        weights = np.concatenate([s.weights for s in samples])
+        grid, psd = doppler_spectrum(freqs, weights)
+        grid = grid - float(info["shift_hz"])       # they tune their own note, too
+        process = channel(env.size, cfg.sample_rate, grid, psd, freq, rng)
+        audio = apply_channel(env, freq, cfg.sample_rate, process)
+        return audio, f"{info['cell']} cell, spread {info['spread_hz']:.0f} Hz"
+    return apply
 
 
 def render(text: str, config: Config | None = None) -> Render:
@@ -211,24 +305,36 @@ def render(text: str, config: Config | None = None) -> Render:
     cfg = config or Config()
     rngs = streams(cfg.seed)
     band = cfg.band_object()
+    mode = (cfg.scatter or "none").lower()
+    if mode not in ("none", "") and mode not in WEATHER_MODES and mode != "aurora":
+        raise ValueError(f"unknown scatter mode: {cfg.scatter!r}")
 
     words, unknown = parse(text)
     timing = Timing(cfg.wpm, cfg.effective_wpm)
     elements = timeline(words, timing)
     keyed = duration(elements)
-    n = max(1, int(np.ceil((keyed + 2 * cfg.pad) * cfg.sample_rate)))
+    wanted = max(1, int(np.ceil((keyed + 2 * cfg.pad) * cfg.sample_rate)))
+    # Everything downstream is a transform over the whole length, so work at a
+    # length the FFT likes and trim the few extra samples of silence off at the
+    # end: the same audio, several times faster.
+    n = fast_length(wanted)
 
     direct, env = keyed_tone(
         elements, cfg.sample_rate, cfg.tone_spec(), rngs["signal"], pad=cfg.pad, length=n
     )
 
     scatter_info: dict[str, object] = {}
-    spec = cfg.scatter_spec()
-    if spec.active:
-        scattered, scatter_info = _scattered_path(cfg, env, band, rngs)
+    cell: Cell | None = None
+    if cfg.scatter_spec().active:
+        if mode in WEATHER_MODES:
+            scattered, scatter_info, cell = _weather_path(cfg, env, band, mode, rngs)
+        else:
+            scattered, scatter_info = _aurora_path(cfg, env, band, rngs)
         direct_amp, scatter_amp = rician_weights(cfg.rician_db)
-        loss = db_to_amp(-float(scatter_info.get("attenuation_db", 0.0)))
-        signal = direct_amp * loss * direct + scatter_amp * scattered
+        # The rain on the way is charged against the signal-to-noise ratio below,
+        # not here: scaling the whole signal would cancel out when the noise is
+        # set from it, and a path loss that changes nothing is a lie.
+        signal = direct_amp * direct + scatter_amp * scattered
     else:
         signal = direct
 
@@ -254,18 +360,29 @@ def render(text: str, config: Config | None = None) -> Render:
         loss = 10.0 * float(np.log10(max(fraction, 1e-9)))
         scatter_info["filter_loss_db"] = loss
         offset += loss
+        # Rain is a two-edged thing: the cell that returns the signal is also
+        # what the signal has to cross, and past about 50 mm/h on 10 GHz the
+        # attenuation wins.
+        offset -= float(scatter_info.get("attenuation_db", 0.0))
         effective_snr = float(cfg.snr_db) + offset
 
     noise_info: dict[str, object] = {}
     out = signal
     if noisy:
-        bus, noise_info = build_noise(n, cfg.sample_rate, cfg.freq, cfg.noise_spec(), rngs)
+        station_scatter = None
+        if cell is not None and cfg.qrm_scatter and cfg.qrm_count:
+            station_scatter = _station_scatter(cfg, band, cell, mode)
+        bus, noise_info = build_noise(n, cfg.sample_rate, cfg.freq, cfg.noise_spec(),
+                                     rngs, scatter=station_scatter)
         if down_power > 1e-18:
             # The floor has unit RMS, so this single gain sets S/N in the pass band.
             noise_gain = float(np.sqrt(down_power) / db_to_amp(float(effective_snr)))
         else:
             noise_gain = 0.25   # nothing of the signal survived: just the band, then
         out = signal + noise_gain * bus
+
+    out = out[:wanted]
+    key_down, key_up = key_down[:wanted], key_up[:wanted]
 
     # Level: set the loud-but-not-crash level first, limit, then fill the file.
     reference = float(np.percentile(np.abs(out), 99.5)) if out.size else 0.0
@@ -296,7 +413,7 @@ def render(text: str, config: Config | None = None) -> Render:
         "char_gap_ms": timing.char_gap * 1000.0,
         "word_gap_ms": timing.word_gap * 1000.0,
         "keyed_seconds": keyed,
-        "duration": n / cfg.sample_rate,
+        "duration": wanted / cfg.sample_rate,
         "sample_rate": cfg.sample_rate,
         "tone_hz": cfg.freq,
         "band": band.label,

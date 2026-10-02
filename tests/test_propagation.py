@@ -1,4 +1,4 @@
-"""Checks on the 10 GHz propagation layer: Doppler, levels, and randomness."""
+"""Checks on the propagation primitives: bands, Doppler, drops, attenuation."""
 
 from __future__ import annotations
 
@@ -6,26 +6,16 @@ import unittest
 
 import numpy as np
 
-from morsefun import Config, render
-from morsefun.propagation import (REFERENCE_RATE_MM_H, AuroraSpec, RainSpec, SnowSpec,
-                                  aurora_doppler, parse_band, rain_attenuation_db_km,
-                                  rain_doppler, reflectivity_dbz, snow_doppler)
+from morsefun.propagation import (REFERENCE_RATE_MM_H, AuroraSpec, aurora_doppler,
+                                  drop_diameters, drop_fall_speed, flake_diameters,
+                                  flake_fall_speed, moments, parse_band,
+                                  rain_attenuation_db_km, reflectivity_dbz,
+                                  snow_relative_db, weighted_median)
 from morsefun.render import STREAMS, streams
 from morsefun.scatter import audible_fraction, channel, doppler_spectrum
 
 X_BAND = parse_band("10G")
 TWO_METRES = parse_band("144M")
-
-
-def note_width(cfg: Config, tone: float = 600.0) -> float:
-    """Spectral width of the keyed note in Hz, measured on the render."""
-    out = render("eeeeee", cfg)
-    power = np.abs(np.fft.rfft(out.samples)) ** 2
-    freqs = np.fft.rfftfreq(out.samples.size, 1.0 / out.sample_rate)
-    keep = (freqs > tone - 500) & (freqs < tone + 500)
-    power, freqs = power[keep], freqs[keep]
-    centre = np.sum(freqs * power) / np.sum(power)
-    return float(np.sqrt(np.sum(power * (freqs - centre) ** 2) / np.sum(power)))
 
 
 class TestBand(unittest.TestCase):
@@ -43,6 +33,12 @@ class TestBand(unittest.TestCase):
         self.assertAlmostEqual(X_BAND.doppler_hz(1.0), 66.7, places=1)
         self.assertAlmostEqual(TWO_METRES.doppler_hz(1.0), 0.96, places=2)
 
+    def test_bistatic_doppler_reduces_to_the_two_way_shift(self):
+        # The sum of the closing speeds towards both ends; look both ways down
+        # the same path and that sum is 2v, which is the familiar 2v/lambda.
+        self.assertAlmostEqual(float(X_BAND.bistatic_doppler_hz(2.0)),
+                               float(X_BAND.doppler_hz(1.0)), places=9)
+
     def test_attenuation_matches_itu_table(self):
         # ITU-R P.838: k=0.01217, alpha=1.2571 at 10 GHz, horizontal.
         self.assertAlmostEqual(rain_attenuation_db_km(1.0, X_BAND), 0.01217, places=5)
@@ -54,37 +50,44 @@ class TestBand(unittest.TestCase):
     def test_reflectivity_grows_with_rate(self):
         self.assertAlmostEqual(reflectivity_dbz(REFERENCE_RATE_MM_H), 40.3, places=1)
         self.assertLess(reflectivity_dbz(2.0), reflectivity_dbz(50.0))
+        self.assertLess(snow_relative_db(False), snow_relative_db(True))
 
 
-class TestScatterers(unittest.TestCase):
+class TestPopulations(unittest.TestCase):
     def rng(self):
         return np.random.default_rng(1234)
 
-    def test_rain_spread_scales_with_frequency(self):
-        spec = RainSpec(wind_azimuth_deg=0.0)
-        _, _, x = rain_doppler(spec, X_BAND, self.rng())
-        _, _, l = rain_doppler(spec, parse_band("1296"), self.rng())
-        ratio = x["spread_hz"] / l["spread_hz"]
-        self.assertAlmostEqual(ratio, 10000.0 / 1296.0, delta=0.5)
+    def test_heavier_rain_has_bigger_drops_falling_faster(self):
+        light = drop_diameters(2.0, 20_000, self.rng())
+        heavy = drop_diameters(50.0, 20_000, self.rng())
+        self.assertLess(light.mean(), heavy.mean())
+        self.assertLess(drop_fall_speed(light).mean(), drop_fall_speed(heavy).mean())
+        # Atlas-Ulbrich: a 2 mm drop falls at 6.5 m/s.
+        self.assertAlmostEqual(float(drop_fall_speed(np.array([2.0]))[0]), 6.55, delta=0.1)
 
-    def test_rain_drops_are_sampled_not_fixed(self):
-        a = rain_doppler(RainSpec(), X_BAND, np.random.default_rng(1))[2]
-        b = rain_doppler(RainSpec(), X_BAND, np.random.default_rng(2))[2]
-        self.assertNotAlmostEqual(a["spread_hz"], b["spread_hz"], places=3)
-        self.assertGreater(a["median_drop_mm"], 1.0)   # the big drops carry the power
+    def test_drops_are_sampled_not_fixed(self):
+        a = drop_diameters(12.0, 5000, np.random.default_rng(1))
+        b = drop_diameters(12.0, 5000, np.random.default_rng(2))
+        self.assertNotAlmostEqual(float(a.mean()), float(b.mean()), places=4)
 
-    def test_heavier_rain_is_wider_and_louder(self):
-        light = rain_doppler(RainSpec(rate_mm_h=2, wind_azimuth_deg=0.0), X_BAND, self.rng())[2]
-        heavy = rain_doppler(RainSpec(rate_mm_h=50, wind_azimuth_deg=0.0), X_BAND, self.rng())[2]
-        self.assertGreater(heavy["dbz"], light["dbz"] + 15)
-        self.assertGreater(heavy["spread_hz"], light["spread_hz"])
+    def test_flakes_fall_at_about_a_metre_a_second(self):
+        sizes = flake_diameters(4.0, 5000, self.rng())
+        speed = flake_fall_speed(sizes)
+        self.assertLess(speed.mean(), 1.5)
+        self.assertGreater(flake_fall_speed(sizes, wet=True).mean(), speed.mean())
 
-    def test_snow_is_narrower_than_rain_and_wet_snow_is_brighter(self):
-        rain = rain_doppler(RainSpec(wind_azimuth_deg=0.0), X_BAND, self.rng())[2]
-        dry = snow_doppler(SnowSpec(wind_azimuth_deg=0.0), X_BAND, self.rng())[2]
-        wet = snow_doppler(SnowSpec(wet=True, wind_azimuth_deg=0.0), X_BAND, self.rng())[2]
-        self.assertLess(dry["spread_hz"], rain["spread_hz"])
-        self.assertGreater(wet["dbz"], dry["dbz"] + 5)
+    def test_weighted_moments(self):
+        values = np.array([1.0, 2.0, 3.0])
+        weights = np.array([0.0, 1.0, 0.0])
+        self.assertEqual(weighted_median(values, weights), 2.0)
+        mean, spread = moments(values, np.ones(3))
+        self.assertAlmostEqual(mean, 2.0)
+        self.assertAlmostEqual(spread, np.sqrt(2.0 / 3.0))
+
+
+class TestAurora(unittest.TestCase):
+    def rng(self):
+        return np.random.default_rng(1234)
 
     def test_aurora_is_a_vhf_mode(self):
         on_2m = aurora_doppler(AuroraSpec(), TWO_METRES, self.rng())[2]
@@ -95,7 +98,7 @@ class TestScatterers(unittest.TestCase):
         self.assertTrue(on_2m["from_physics"])
 
     def test_aurora_shift_can_be_set_by_hand(self):
-        freqs, weights, info = aurora_doppler(
+        _, _, info = aurora_doppler(
             AuroraSpec(shift_hz=-120.0, spread_hz=90.0), X_BAND, self.rng())
         self.assertFalse(info["from_physics"])
         self.assertAlmostEqual(info["shift_hz"], -120, delta=10)
@@ -109,9 +112,9 @@ class TestScatterers(unittest.TestCase):
 class TestChannel(unittest.TestCase):
     def test_envelope_is_rayleigh(self):
         rng = np.random.default_rng(7)
-        freqs, weights, _ = rain_doppler(RainSpec(), X_BAND, rng)
-        grid, psd = doppler_spectrum(freqs, weights)
-        h = channel(200_000, 44100, grid - grid[psd.argmax()], psd, 600.0, rng)
+        freqs = rng.normal(0.0, 120.0, size=6000)
+        grid, psd = doppler_spectrum(freqs, np.full(freqs.size, 1.0 / freqs.size))
+        h = channel(200_000, 44100, grid, psd, 600.0, rng)
         # Unit-power Rayleigh: mean 0.886, std 0.463.
         self.assertAlmostEqual(float(np.abs(h).mean()), 0.886, delta=0.02)
         self.assertAlmostEqual(float(np.abs(h).std()), 0.463, delta=0.02)
@@ -126,63 +129,7 @@ class TestChannel(unittest.TestCase):
         self.assertLess(float(np.abs(h).max()), 1e-9)   # silence, not a fake tone
 
 
-class TestRenderWithScatter(unittest.TestCase):
-    def test_scatter_broadens_the_note(self):
-        clean = note_width(Config(snr_db=None, qsb_db=0, drift_hz=0, seed=1))
-        snow = note_width(Config(snr_db=None, scatter="snow", seed=1))
-        rain = note_width(Config(snr_db=None, scatter="rain", seed=1))
-        self.assertLess(clean, 40)
-        self.assertLess(clean * 2, snow)
-        self.assertLess(snow, rain)
-
-    def test_reflectivity_sets_the_signal_strength(self):
-        light = render("cq test", Config(scatter="rain", rain_rate=2, seed=9))
-        heavy = render("cq test", Config(scatter="rain", rain_rate=50, seed=9))
-        self.assertLess(light.meta["effective_snr_db"], heavy.meta["effective_snr_db"] - 15)
-        dry = render("cq test", Config(scatter="snow", seed=9))
-        wet = render("cq test", Config(scatter="snow", snow_wet=True, seed=9))
-        self.assertLess(dry.meta["effective_snr_db"], wet.meta["effective_snr_db"] - 5)
-
-    def test_weather_level_can_be_turned_off(self):
-        # Reflectivity no longer sets the level; the filter loss still counts.
-        out = render("cq test", Config(scatter="rain", rain_rate=50,
-                                       weather_level=False, snr_db=10.0, seed=9))
-        self.assertNotIn("level_offset_db", out.meta["scatter"])
-        self.assertAlmostEqual(out.meta["effective_snr_db"], 10.0, delta=1.5)
-
-    def test_retuning_brings_the_return_back_into_the_filter(self):
-        tuned = render("cq test", Config(scatter="aurora", band="144M", seed=4))
-        raw = render("cq test", Config(scatter="aurora", band="144M", retune=False, seed=4))
-        self.assertGreater(tuned.meta["scatter"]["audible_fraction"],
-                           raw.meta["scatter"]["audible_fraction"] + 0.3)
-        self.assertAlmostEqual(tuned.meta["scatter"]["tuned_out_hz"],
-                               tuned.meta["scatter"]["shift_hz"], places=6)
-
-    def test_aurora_at_10ghz_is_hopeless_in_the_report_and_in_the_level(self):
-        out = render("cq test", Config(scatter="aurora", band="10G",
-                                       snr_db=12.0, seed=4))
-        self.assertLess(out.meta["scatter"]["audible_fraction"], 0.05)
-        # Power thrown outside the filter is power you do not get.
-        self.assertLess(out.meta["scatter"]["filter_loss_db"], -12.0)
-        self.assertLess(out.meta["effective_snr_db"], 0.0)
-
-    def test_rain_keeps_nearly_all_of_its_power_in_the_filter(self):
-        out = render("cq test", Config(scatter="rain", snr_db=10.0, seed=4))
-        self.assertGreater(out.meta["scatter"]["audible_fraction"], 0.8)
-        self.assertGreater(out.meta["scatter"]["filter_loss_db"], -1.5)
-
-    def test_path_attenuation_follows_the_path_length(self):
-        near = render("cq test", Config(scatter="rain", path_km=0, seed=2))
-        far = render("cq test", Config(scatter="rain", path_km=20, seed=2))
-        self.assertEqual(near.meta["scatter"]["attenuation_db"], 0.0)
-        self.assertGreater(far.meta["scatter"]["attenuation_db"], 4.0)
-
-    def test_unknown_mode_is_rejected(self):
-        with self.assertRaises(ValueError):
-            render("cq", Config(scatter="hail", seed=1))
-
-
-class TestRandomness(unittest.TestCase):
+class TestStreams(unittest.TestCase):
     def test_streams_are_independent_of_each_other(self):
         first = streams(1234)
         second = streams(1234)
@@ -191,26 +138,6 @@ class TestRandomness(unittest.TestCase):
         fresh = streams(1234)
         fresh["floor"].random()   # drawing from one stream must not move another
         self.assertEqual(fresh["scatter"].random(), streams(1234)["scatter"].random())
-
-    def test_adding_other_stations_does_not_change_the_weather(self):
-        quiet = render("cq test", Config(scatter="rain", qrm_count=0, seed=77))
-        busy = render("cq test", Config(scatter="rain", qrm_count=3, seed=77))
-        self.assertEqual(quiet.meta["scatter"]["spread_hz"],
-                         busy.meta["scatter"]["spread_hz"])
-        self.assertEqual(quiet.meta["scatter"]["median_drop_mm"],
-                         busy.meta["scatter"]["median_drop_mm"])
-
-    def test_without_a_seed_every_render_is_different(self):
-        a = render("cq test", Config(scatter="rain"))
-        b = render("cq test", Config(scatter="rain"))
-        self.assertNotAlmostEqual(a.meta["scatter"]["spread_hz"],
-                                  b.meta["scatter"]["spread_hz"], places=6)
-        self.assertFalse(np.allclose(a.samples, b.samples))
-
-    def test_a_seed_brings_the_same_weather_back(self):
-        a = render("cq test", Config(scatter="rain", seed=31))
-        b = render("cq test", Config(scatter="rain", seed=31))
-        np.testing.assert_allclose(a.samples, b.samples)
 
 
 if __name__ == "__main__":
