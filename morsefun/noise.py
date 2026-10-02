@@ -21,7 +21,7 @@ import numpy as np
 
 from .dsp import band_response, bandpass, db_to_amp, rms, smooth_noise
 from .morse import Timing, parse, timeline
-from .synth import ToneSpec, keyed_tone
+from .synth import ToneSpec, keyed_tone, keying_envelope
 
 CALL_PREFIXES = (
     "sp", "sq", "dl", "ok", "oh", "sm", "la", "ea", "on", "pa", "yo", "yu",
@@ -108,9 +108,18 @@ def random_call(rng: np.random.Generator) -> str:
 
 
 def qrm(
-    n: int, sample_rate: int, center: float, spec: NoiseSpec, rng: np.random.Generator
+    n: int, sample_rate: int, center: float, spec: NoiseSpec, rng: np.random.Generator,
+    scatter=None,
 ) -> tuple[np.ndarray, list[str]]:
-    """Other stations working through the pass band."""
+    """Other stations working through the pass band.
+
+    ``scatter``, if given, is called with ``(envelope, tone, rng)`` and returns
+    the station already scattered off its own cell plus a note about it.  On a
+    scatter path that is the whole point: the neighbours are in the same rain,
+    but none of them is on the same path through it, so none of them sounds the
+    same.  A scattered station gets no fading of its own -- the cell gives it
+    more flutter than a fading rig ever would.
+    """
     out = np.zeros(n)
     notes: list[str] = []
     for _ in range(max(0, spec.qrm_count)):
@@ -126,23 +135,23 @@ def qrm(
             freq=max(80.0, center + offset),
             rise_ms=float(rng.uniform(3.0, 9.0)),
             level=db_to_amp(level_db),
-            drift_hz=float(rng.uniform(0.0, 4.0)),
+            drift_hz=0.0 if scatter else float(rng.uniform(0.0, 4.0)),
             drift_rate=0.05,
-            qsb_db=float(rng.uniform(2.0, 14.0)),
+            qsb_db=0.0 if scatter else float(rng.uniform(2.0, 14.0)),
             qsb_rate=float(rng.uniform(0.1, 0.5)),
         )
-        audio, _ = keyed_tone(
-            elements,
-            sample_rate,
-            station,
-            rng,
-            length=n,
-            offset=float(rng.uniform(-0.5, 1.0)) * n / sample_rate,
-        )
+        start = float(rng.uniform(-0.5, 1.0)) * n / sample_rate
+        note = f"{call} at {station.freq - center:+.0f} Hz, {wpm:.0f} wpm, {level_db:+.0f} dB"
+        if scatter is None:
+            audio, _ = keyed_tone(elements, sample_rate, station, rng, length=n, offset=start)
+        else:
+            env = keying_envelope(elements, sample_rate, station.rise_ms,
+                                  length=n, offset=start)
+            audio, detail = scatter(env, station.freq, rng)
+            audio = audio * station.level
+            note += f", {detail}"
         out += bandpass(audio, sample_rate, center, spec.bandwidth)
-        notes.append(
-            f"{call} at {station.freq - center:+.0f} Hz, {wpm:.0f} wpm, {level_db:+.0f} dB"
-        )
+        notes.append(note)
     return out, notes
 
 
@@ -167,7 +176,7 @@ def heterodynes(
 
 def build_noise(
     n: int, sample_rate: int, center: float, spec: NoiseSpec,
-    rngs: dict[str, np.random.Generator],
+    rngs: dict[str, np.random.Generator], scatter=None,
 ) -> tuple[np.ndarray, dict[str, object]]:
     """Mix the whole band onto one bus whose noise floor has unit RMS.
 
@@ -183,7 +192,7 @@ def build_noise(
         bus += crashes
         info["crashes"] = int(round(spec.crash_rate * n / sample_rate))
 
-    stations, notes = qrm(n, sample_rate, center, spec, rngs["qrm"])
+    stations, notes = qrm(n, sample_rate, center, spec, rngs["qrm"], scatter)
     if notes:
         bus += stations
         info["qrm"] = notes

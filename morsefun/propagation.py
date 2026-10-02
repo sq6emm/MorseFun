@@ -1,15 +1,20 @@
 """What the signal bounces off on the way, and how fast it is moving.
 
 Everything here is about one number: the Doppler frequency a scatterer puts on
-the signal, ``2 v_radial / lambda`` for a there-and-back path.  At 10 GHz the
-wavelength is 30 mm, so one metre per second is 67 Hz -- which is why rain
-scatter on this band sounds like hissing rather than like a tone, and why a
-mode that works on 2 m does not survive here at all.
+the signal.  For a path that goes out and comes back the same way that is
+``2 v_radial / lambda``; at 10 GHz the wavelength is 30 mm, so one metre per
+second is 67 Hz -- which is why rain scatter on this band sounds like hissing
+rather than like a tone, and why a mode that works on 2 m does not survive here
+at all.
 
-Nothing in this module is a fixed curve.  Drops are sampled one at a time from
-a size distribution, weighted by their own radar cross section, and given their
-own fall speed and their own share of the turbulence, so no two renders see the
-same rain.
+This module holds the primitives: the band, the ITU-R attenuation and
+reflectivity curves, and the drop and flake populations that a scattering
+volume is made of.  What a volume *looks like* to two stations -- its cores,
+its shape, the angle they see it at -- is :mod:`morsefun.cell`.
+
+Nothing here is a fixed curve.  Drops are sampled one at a time from a size
+distribution and given their own fall speed, so no two renders see the same
+rain.
 """
 
 from __future__ import annotations
@@ -68,6 +73,16 @@ class Band:
         """Two-way Doppler shift for a radial velocity, in Hz."""
         return 2.0 * velocity_mps / self.wavelength_m
 
+    def bistatic_doppler_hz(self, closing_mps: float | np.ndarray) -> float | np.ndarray:
+        """Doppler for the *sum* of the closing speeds towards both ends.
+
+        Scattering is bistatic: the transmitter and the receiver each see their
+        own share of the motion, and only the sum is heard.  For a radar that
+        transmits and receives in the same direction the sum is ``2 v`` and
+        this is :meth:`doppler_hz` again.
+        """
+        return np.asarray(closing_mps, dtype=np.float64) / self.wavelength_m
+
 
 def parse_band(text: str) -> Band:
     """``10G``, ``10GHz``, ``10.368 GHz``, ``1296``, ``144M``, ``3cm``, ``30mm``."""
@@ -112,31 +127,61 @@ def reflectivity_dbz(rate_mm_h: float) -> float:
     return float(10.0 * np.log10(200.0 * rate_mm_h**1.6))
 
 
-@dataclass
-class RainSpec:
-    """A volume of falling rain, seen by two stations pointed into it."""
+def snow_relative_db(wet: bool) -> float:
+    """What snow is worth against the same rate of rain.
 
-    rate_mm_h: float = 12.0
-    elevation_deg: float = 8.0       # elevation of the common volume
-    wind_mps: float = 6.0            # horizontal wind through the volume
-    wind_azimuth_deg: float | None = None   # None: drawn at random per render
-    turbulence_mps: float = 2.5      # velocity spread inside the volume
-    path_km: float = 0.0             # rain along the path, for attenuation
-    drops: int = 6000                # how many scatterers to sample
+    Dry snowflakes are poor scatterers -- the ice dielectric factor alone costs
+    about 6.5 dB -- while wet ones in the melting layer, water-coated and
+    still flake-sized, are brighter than the equivalent rain: the bright band.
+    """
+    return 3.0 if wet else -6.5
 
 
-@dataclass
-class SnowSpec:
-    """Snow: slower, weaker, and brighter the moment it starts melting."""
+def drop_diameters(rate_mm_h: float, count: int, rng: np.random.Generator) -> np.ndarray:
+    """Marshall-Palmer drop sizes in mm: ``N(D) = N0 exp(-4.1 R^-0.21 D)``."""
+    rate = max(float(rate_mm_h), 0.01)
+    lam = 4.1 * rate**-0.21                                  # 1/mm
+    return np.clip(rng.exponential(1.0 / lam, size=int(count)), 0.1, 7.0)
 
-    rate_mm_h: float = 4.0           # water equivalent
-    wet: bool = False                # melting layer, the radar bright band
-    elevation_deg: float = 8.0
-    wind_mps: float = 5.0
-    wind_azimuth_deg: float | None = None
-    turbulence_mps: float = 0.9
-    path_km: float = 0.0
-    flakes: int = 6000
+
+def drop_fall_speed(diameters: np.ndarray) -> np.ndarray:
+    """Atlas-Ulbrich terminal velocity: ``v = 9.65 - 10.3 exp(-0.6 D)`` m/s."""
+    return np.clip(9.65 - 10.3 * np.exp(-0.6 * diameters), 0.2, 10.0)
+
+
+def flake_diameters(rate_mm_h: float, count: int, rng: np.random.Generator) -> np.ndarray:
+    """Gunn-Marshall aggregate sizes, as melted diameter in mm."""
+    rate = max(float(rate_mm_h), 0.01)
+    lam = 25.5 * rate**-0.48
+    return np.clip(rng.exponential(1.0 / lam, size=int(count)), 0.1, 8.0)
+
+
+def flake_fall_speed(diameters: np.ndarray, wet: bool = False) -> np.ndarray:
+    """Aggregates fall at about a metre a second whatever their size."""
+    return np.clip(0.8 * diameters**0.16 * (1.6 if wet else 1.0), 0.2, 3.0)
+
+
+def weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """Median of ``values`` weighted by how hard each one scatters."""
+    if values.size == 0:
+        return 0.0
+    order = np.argsort(values)
+    cumulative = np.cumsum(weights[order])
+    if cumulative[-1] <= 0:
+        return float(np.median(values))
+    return float(values[order][np.searchsorted(cumulative, 0.5 * cumulative[-1])])
+
+
+def moments(freqs: np.ndarray, weights: np.ndarray) -> tuple[float, float]:
+    """Mean Doppler and Doppler spread of a weighted population, in Hz."""
+    if freqs.size == 0:
+        return 0.0, 0.0
+    total = float(np.sum(weights))
+    if total <= 0:
+        return 0.0, 0.0
+    mean = float(np.sum(freqs * weights) / total)
+    spread = float(np.sqrt(np.sum(weights * (freqs - mean) ** 2) / total))
+    return mean, spread
 
 
 @dataclass
@@ -161,105 +206,6 @@ class AuroraSpec:
     cells: int = 4000
 
 
-def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
-    """Median of ``values`` weighted by how hard each one scatters."""
-    order = np.argsort(values)
-    cumulative = np.cumsum(weights[order])
-    return float(values[order][np.searchsorted(cumulative, 0.5 * cumulative[-1])])
-
-
-def _wind_radial(spec_wind: float, azimuth_deg: float | None, elevation_deg: float,
-                 rng: np.random.Generator) -> tuple[float, float]:
-    """Radial component of the wind, and the azimuth actually used."""
-    azimuth = float(rng.uniform(0.0, 360.0)) if azimuth_deg is None else float(azimuth_deg)
-    radial = spec_wind * np.cos(np.radians(azimuth)) * np.cos(np.radians(elevation_deg))
-    return float(radial), azimuth
-
-
-def rain_doppler(spec: RainSpec, band: Band, rng: np.random.Generator):
-    """Sample a raining volume: Doppler frequencies and their weights.
-
-    Sizes come from Marshall-Palmer (``N(D) = N0 exp(-4.1 R^-0.21 D)``), fall
-    speeds from Atlas-Ulbrich (``v = 9.65 - 10.3 exp(-0.6 D)`` m/s), and each
-    drop is weighted by ``D^6`` because that is how hard it scatters.
-    """
-    rate = max(spec.rate_mm_h, 0.01)
-    lam = 4.1 * rate**-0.21                       # 1/mm
-    diameters = rng.exponential(1.0 / lam, size=spec.drops)
-    diameters = np.clip(diameters, 0.1, 7.0)      # mm, the drops that exist
-    fall = np.clip(9.65 - 10.3 * np.exp(-0.6 * diameters), 0.2, 10.0)
-
-    wind_radial, azimuth = _wind_radial(
-        spec.wind_mps, spec.wind_azimuth_deg, spec.elevation_deg, rng)
-    turbulence = rng.normal(0.0, max(spec.turbulence_mps, 0.0), size=spec.drops)
-    radial = fall * np.sin(np.radians(spec.elevation_deg)) + wind_radial + turbulence
-
-    freqs = np.asarray(band.doppler_hz(radial), dtype=np.float64)
-    weights = diameters**6.0
-    weights /= weights.sum()
-
-    mean = float(np.sum(freqs * weights))
-    spread = float(np.sqrt(np.sum(weights * (freqs - mean) ** 2)))
-    info = {
-        "kind": "rain",
-        "rate_mm_h": rate,
-        "dbz": reflectivity_dbz(rate),
-        "median_drop_mm": _weighted_median(diameters, weights),
-        "wind_azimuth_deg": azimuth,
-        "wind_radial_mps": wind_radial,
-        "shift_hz": mean,
-        "spread_hz": spread,
-        "scatterers": int(spec.drops),
-        "attenuation_db": rain_attenuation_db_km(rate, band) * max(spec.path_km, 0.0),
-    }
-    return freqs, weights, info
-
-
-def snow_doppler(spec: SnowSpec, band: Band, rng: np.random.Generator):
-    """Sample falling snow.
-
-    Aggregate sizes follow Gunn-Marshall (``Lambda = 25.5 R^-0.48`` on melted
-    diameter) and fall at around a metre a second however big they are, so the
-    spread is narrower than rain and the wind does most of the work.  Dry
-    snowflakes are poor scatterers -- the ice dielectric factor alone costs
-    about 6.5 dB -- while wet ones in the melting layer are brighter than the
-    equivalent rain.
-    """
-    rate = max(spec.rate_mm_h, 0.01)
-    lam = 25.5 * rate**-0.48
-    diameters = np.clip(rng.exponential(1.0 / lam, size=spec.flakes), 0.1, 8.0)
-    # Aggregates: v ~ 0.8 D^0.16, a metre a second give or take.
-    fall = np.clip(0.8 * diameters**0.16 * (1.6 if spec.wet else 1.0), 0.2, 3.0)
-
-    wind_radial, azimuth = _wind_radial(
-        spec.wind_mps, spec.wind_azimuth_deg, spec.elevation_deg, rng)
-    turbulence = rng.normal(0.0, max(spec.turbulence_mps, 0.0), size=spec.flakes)
-    radial = fall * np.sin(np.radians(spec.elevation_deg)) + wind_radial + turbulence
-
-    freqs = np.asarray(band.doppler_hz(radial), dtype=np.float64)
-    weights = diameters**6.0
-    weights /= weights.sum()
-
-    mean = float(np.sum(freqs * weights))
-    spread = float(np.sqrt(np.sum(weights * (freqs - mean) ** 2)))
-    ice_db = 3.0 if spec.wet else -6.5
-    info = {
-        "kind": "wet snow" if spec.wet else "snow",
-        "rate_mm_h": rate,
-        "dbz": reflectivity_dbz(rate) + ice_db,
-        "median_melted_mm": _weighted_median(diameters, weights),
-        "wind_azimuth_deg": azimuth,
-        "wind_radial_mps": wind_radial,
-        "shift_hz": mean,
-        "spread_hz": spread,
-        "scatterers": int(spec.flakes),
-        "relative_db": ice_db,
-        "attenuation_db": rain_attenuation_db_km(rate * (0.6 if spec.wet else 0.25), band)
-        * max(spec.path_km, 0.0),
-    }
-    return freqs, weights, info
-
-
 def aurora_doppler(spec: AuroraSpec, band: Band, rng: np.random.Generator):
     """Sample an auroral curtain: fast bulk drift with a turbulent spread."""
     sign = 1.0 if spec.toward else -1.0
@@ -276,8 +222,7 @@ def aurora_doppler(spec: AuroraSpec, band: Band, rng: np.random.Generator):
     weights = rng.lognormal(0.0, 0.8, size=spec.cells)   # patchy reflectors
     weights /= weights.sum()
 
-    mean = float(np.sum(freqs * weights))
-    spread_hz = float(np.sqrt(np.sum(weights * (freqs - mean) ** 2)))
+    mean, spread_hz = moments(freqs, weights)
     info = {
         "kind": "aurora",
         "from_physics": physical,

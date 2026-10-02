@@ -12,6 +12,14 @@ Two things follow for free.  The envelope of the sum is Rayleigh distributed,
 so the signal flutters the way scatter really does, and anything the Doppler
 throws outside the audio band simply is not there any more -- which is the
 whole story of why 10 GHz aurora is not a mode.
+
+A cloud does not hold still, though, so a single fixed spectrum is not enough.
+:class:`EvolvingSpectrum` carries one component per scattering core, each free
+to change its level, its mean Doppler and its width as the message goes out,
+and :func:`evolving_channel` colours *one* stream of white noise through that
+changing spectrum, frame by frame, with the overlap-add of a short-time Fourier
+transform.  Because every frame filters the same white noise, nothing clicks or
+jumps at a frame boundary: the note just goes on breathing.
 """
 
 from __future__ import annotations
@@ -23,6 +31,14 @@ import numpy as np
 from .dsp import smooth_noise
 
 GRID_POINTS = 8192
+
+#: Grid points per smoothing width: enough to draw a smooth shape, no more.
+POINTS_PER_WIDTH = 8
+
+#: How many frequency bins the narrowest part of a spectrum should get.  A
+#: narrow spectrum is given a long analysis block to resolve it -- which it can
+#: afford, because a cell that narrow is also a cell that changes slowly.
+BINS_PER_SPREAD = 10
 
 
 @dataclass
@@ -61,6 +77,10 @@ def doppler_spectrum(
     if hi - lo < 8 * width:
         lo, hi = mean - 8 * width, mean + 8 * width
 
+    # Resolution follows the smoothing width: a handful of points per width is
+    # all a smooth shape needs, and a narrow spectrum on a huge grid would cost
+    # a kernel thousands of taps long for nothing.
+    points = int(np.clip(POINTS_PER_WIDTH * (hi - lo) / width, 64, points))
     grid = np.linspace(lo, hi, points)
     step = grid[1] - grid[0]
     hist, _ = np.histogram(samples, bins=points, range=(lo, hi), weights=weights)
@@ -160,3 +180,169 @@ def rician_weights(rician_db: float) -> tuple[float, float]:
     """Amplitude weights for the direct and scattered paths."""
     k = 10.0 ** (float(rician_db) / 10.0)
     return float(np.sqrt(k / (k + 1.0))), float(np.sqrt(1.0 / (k + 1.0)))
+
+
+@dataclass
+class Component:
+    """One scattering core, as the channel sees it.
+
+    ``freqs`` and ``weights`` are the core's own scatterers.  The three series
+    are per frame of the synthesis: ``gain`` scales its power, ``shift`` moves
+    its whole note in Hz, and ``width`` stretches its spread about its centre.
+    """
+
+    freqs: np.ndarray
+    weights: np.ndarray
+    centre_hz: float = 0.0
+    gain: np.ndarray | None = None
+    shift: np.ndarray | None = None
+    width: np.ndarray | None = None
+
+    def transform(self, frame: int) -> tuple[np.ndarray, np.ndarray]:
+        """This core's Doppler samples and weights as they are in ``frame``."""
+        width = 1.0 if self.width is None else float(self.width[min(frame, self.width.size - 1)])
+        shift = 0.0 if self.shift is None else float(self.shift[min(frame, self.shift.size - 1)])
+        gain = 1.0 if self.gain is None else float(self.gain[min(frame, self.gain.size - 1)])
+        freqs = self.centre_hz + (self.freqs - self.centre_hz) * width + shift
+        return freqs, self.weights * gain
+
+
+class EvolvingSpectrum:
+    """The Doppler spectrum of a whole cell, on a fixed grid, frame by frame.
+
+    The grid is in Hz relative to the carrier and wide enough for every frame,
+    so the components can wander about inside it without the shape being
+    clipped.  Weights are *not* renormalised per frame: a core that fades is
+    meant to come out quieter.
+    """
+
+    def __init__(self, components: list[Component], points: int = 2048,
+                 smooth_hz: float | None = None):
+        self.components = [c for c in components if c.freqs.size]
+        self.frames = max((c.gain.size if c.gain is not None else 1)
+                          for c in self.components) if self.components else 1
+        lo, hi, spread = 0.0, 0.0, 1.0
+        if self.components:
+            freqs = np.concatenate([c.freqs for c in self.components])
+            weights = np.concatenate([c.weights for c in self.components])
+            mean = float(np.sum(freqs * weights) / max(float(weights.sum()), 1e-12))
+            spread = float(np.sqrt(np.sum(weights * (freqs - mean) ** 2)
+                                   / max(float(weights.sum()), 1e-12)))
+            edges = []
+            for c in self.components:
+                stretch = 1.0 if c.width is None else float(np.max(c.width))
+                low = 0.0 if c.shift is None else float(np.min(c.shift))
+                high = 0.0 if c.shift is None else float(np.max(c.shift))
+                centre, fmin, fmax = c.centre_hz, float(c.freqs.min()), float(c.freqs.max())
+                edges.append(centre + (fmin - centre) * stretch + low)
+                edges.append(centre + (fmax - centre) * stretch + high)
+            lo, hi = min(edges), max(edges)
+        self.width_hz = float(smooth_hz) if smooth_hz else max(spread / 12.0, 1.0)
+        if hi - lo < 8 * self.width_hz:
+            middle = 0.5 * (lo + hi)
+            lo, hi = middle - 4 * self.width_hz, middle + 4 * self.width_hz
+        lo, hi = lo - 4 * self.width_hz, hi + 4 * self.width_hz
+        self.points = int(np.clip(POINTS_PER_WIDTH * (hi - lo) / self.width_hz,
+                                  96, points))
+        self.grid = np.linspace(lo, hi, self.points)
+        self._range = (lo, hi)
+        step = (hi - lo) / max(self.points - 1, 1)
+        sigma = max(self.width_hz / step, 1.0)
+        half = int(np.ceil(4 * sigma))
+        kernel = np.exp(-0.5 * (np.arange(-half, half + 1) / sigma) ** 2)
+        self._kernel = kernel / kernel.sum()
+        self._mean: np.ndarray | None = None
+
+    def psd(self, frame: int) -> np.ndarray:
+        """The power spectrum in one frame, on :attr:`grid`."""
+        total = np.zeros(self.points)
+        for component in self.components:
+            freqs, weights = component.transform(frame)
+            hist, _ = np.histogram(freqs, bins=self.points, range=self._range, weights=weights)
+            total += hist
+        return np.convolve(total, self._kernel, mode="same")
+
+    def mean_psd(self) -> np.ndarray:
+        """The spectrum averaged over the whole message: what a report quotes."""
+        if self._mean is None:
+            total = np.zeros(self.points)
+            for frame in range(self.frames):
+                total += self.psd(frame)
+            self._mean = total / max(self.frames, 1)
+        return self._mean
+
+    def moments(self) -> tuple[float, float]:
+        """Mean Doppler and spread of the average spectrum, in Hz."""
+        psd = self.mean_psd()
+        total = float(psd.sum())
+        if total <= 0:
+            return 0.0, 0.0
+        mean = float(np.sum(self.grid * psd) / total)
+        spread = float(np.sqrt(np.sum(psd * (self.grid - mean) ** 2) / total))
+        return mean, spread
+
+    def retune(self, hz: float) -> None:
+        """Tune the whole return by ``hz``, the way an operator would."""
+        self.grid = self.grid + float(hz)
+        self._range = (self._range[0] + float(hz), self._range[1] + float(hz))
+
+
+def block_size(spread_hz: float, sample_rate: int, n: int,
+               bins: int = BINS_PER_SPREAD, lo: int = 2048, hi: int = 65536) -> int:
+    """Analysis block long enough to resolve ``spread_hz`` with ``bins`` bins."""
+    want = bins * sample_rate / max(float(spread_hz), 1.0)
+    want = float(np.clip(want, lo, hi))
+    size = 1 << int(np.ceil(np.log2(want)))
+    ceiling = 1 << int(np.ceil(np.log2(max(n, lo))))
+    return int(min(size, max(lo, ceiling)))
+
+
+def frame_count(n: int, block: int) -> int:
+    """How many analysis frames :func:`evolving_channel` will ask the cell for."""
+    hop = max(int(block) // 2, 1)
+    return int(max(1, (max(int(n), 1) + hop - 1) // hop + 1))
+
+
+def evolving_channel(
+    n: int, sample_rate: int, spectrum: EvolvingSpectrum, tone_hz: float,
+    rng: np.random.Generator, block: int = 8192,
+) -> np.ndarray:
+    """A complex Gaussian scatter process whose spectrum changes as it goes.
+
+    One white noise sequence is coloured frame by frame -- Hann window in,
+    overlap-add out, divided by the window power so the seams are exact -- so
+    the result is a single coherent process that happens to be fading, wandering
+    and breathing the way the cell does.  Normalised to unit mean power, with
+    anything outside the audio band dropped rather than folded back.
+    """
+    if n <= 0 or not spectrum.components:
+        return np.zeros(max(n, 0), dtype=np.complex128)
+    block = max(int(block), 256)
+    hop = block // 2
+    frames = frame_count(n, block)
+    total = (frames - 1) * hop + block
+    window = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(block) / block)
+
+    white = rng.standard_normal(total) + 1j * rng.standard_normal(total)
+    out = np.zeros(total, dtype=np.complex128)
+    norm = np.zeros(total)
+    freqs = np.fft.fftfreq(block, 1.0 / sample_rate)
+    playable = (freqs + tone_hz > 20.0) & (freqs + tone_hz < sample_rate / 2.0 - 20.0)
+
+    for frame in range(frames):
+        start = frame * hop
+        norm[start:start + block] += window**2
+        psd = spectrum.psd(min(frame, spectrum.frames - 1))
+        shape = np.interp(freqs, spectrum.grid, psd, left=0.0, right=0.0)
+        shape = np.where(playable, shape, 0.0)
+        if shape.sum() <= 0:
+            continue
+        segment = white[start:start + block] * window
+        coloured = np.fft.ifft(np.fft.fft(segment) * np.sqrt(shape))
+        out[start:start + block] += coloured * window
+
+    out = out[:n] / np.where(norm[:n] > 1e-9, norm[:n], 1.0)
+    power = float(np.mean(np.abs(out) ** 2))
+    if power <= 1e-30:
+        return np.zeros(n, dtype=np.complex128)
+    return out / np.sqrt(power)
