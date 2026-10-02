@@ -66,10 +66,12 @@
 <body>
 <header>
   <h1>Morse<span>Fun</span> &mdash; live off a rain cell</h1>
-  <p class="lede">Key a message and hear it come back the way it would off weather
-  on 10 GHz. Every render draws a different front: its cores, its lift and shear,
-  and the angle both stations look into it. Press <em>another front</em> a few
-  times &mdash; the same rain never sounds the same twice.</p>
+  <p class="lede">Key a message and hear it come back off weather on 10 GHz, off
+  a layer on 2200 m, or off the Moon. Every render draws a different path &mdash;
+  a cell's cores and the angle both stations look into it, a reflecting layer
+  that will not hold still, a libration rate &mdash; so press <em>another
+  front</em> a few times: the same rain never sounds the same twice. At QRSS
+  speeds nothing is listened to by ear: watch the trace instead.</p>
 </header>
 
 <main>
@@ -93,6 +95,21 @@
         <div><label for="scatter">scatter</label><select id="scatter" name="scatter"></select></div>
         <div><label for="band">band</label><input id="band" name="band" placeholder="10G"></div>
       </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>slow modes</legend>
+      <div class="row">
+        <div><label for="qrss">QRSS dit</label><select id="qrss" name="qrss"></select></div>
+        <div><label for="libration">libration &deg;/day</label><input id="libration" name="libration" type="number" min="0.2" max="8" step="0.1" placeholder="auto"></div>
+      </div>
+      <div class="row three">
+        <div><label for="layer_rate">layer m/s</label><input id="layer_rate" name="layer_rate" type="number" min="-5" max="5" step="0.1" placeholder="auto"></div>
+        <div><label for="takeoff">take-off&deg;</label><input id="takeoff" name="takeoff" type="number" min="5" max="80" step="5" placeholder="auto"></div>
+        <div><label for="iono_modes">hops</label><input id="iono_modes" name="iono_modes" type="number" min="1" max="3" step="1" placeholder="auto"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="echo_test" name="echo_test"> EME echo test: hear your own keying, then the Moon</label>
+      <label class="check"><input type="checkbox" id="doppler_off" name="doppler_off"> do not follow the Doppler, let the trace slope</label>
     </fieldset>
 
     <fieldset>
@@ -167,7 +184,8 @@ function fill(select, values, chosen) {
   select.innerHTML = '';
   for (const value of values) {
     const option = document.createElement('option');
-    option.value = (value === 'auto' || value === 'as the profile') ? '' : value;
+    option.value = (value === 'auto' || value === 'as the profile'
+                    || value === 'off') ? '' : value;
     option.textContent = value;
     if (value === chosen) option.selected = true;
     select.append(option);
@@ -189,6 +207,7 @@ async function boot() {
   fill(document.getElementById('scatter'), ['as the profile', ...options.scatter],
        'as the profile');
   fill(document.getElementById('cell'), options.characters, 'auto');
+  fill(document.getElementById('qrss'), ['off', ...options.qrss.map(String)], 'off');
   describeProfile();
   send();
 }
@@ -213,6 +232,7 @@ function payload() {
   }
   // Checkboxes that mean "turn the default off".
   if (out.evolve_off) { delete out.evolve_off; out.evolve = false; }
+  if (out.doppler_off) { delete out.doppler_off; out.doppler_track = false; }
   if (out.qrm_direct) { delete out.qrm_direct; out.qrm_scatter = false; }
   if (out.snow_wet) out.snow_wet = true;
   if (out.no_noise) out.no_noise = true;
@@ -268,13 +288,27 @@ async function send() {
     if (!response.ok) throw new Error(body.error || response.statusText);
     report.textContent = body.report;
     const scatter = body.meta.scatter || {};
+    const qrss = body.meta.qrss || {};
+    const spread = (hz) => hz >= 1 ? hz.toFixed(hz >= 100 ? 0 : 2) + ' Hz'
+                                   : (hz * 1000).toFixed(1) + ' mHz';
+    let says = '';
     if (scatter.sounds_like) {
-      verdict.innerHTML = '<b>' + (scatter.cell || scatter.kind) + '</b>, ' +
-        scatter.spread_hz.toFixed(0) + ' Hz of Doppler spread &mdash; ' + scatter.sounds_like;
+      says = '<b>' + (scatter.cell || scatter.kind) + '</b>, ' + spread(scatter.spread_hz) +
+             ' of Doppler spread &mdash; ' + scatter.sounds_like;
+      if (scatter.delay_s) says += ', the echo ' + scatter.delay_s.toFixed(2) + ' s late';
     } else {
-      verdict.textContent = 'S/N ' + (body.meta.measured_snr_db ?? 0).toFixed(1) +
-        ' dB measured, no scatter on this path.';
+      says = 'S/N ' + (body.meta.measured_snr_db ?? 0).toFixed(1) +
+             ' dB measured, no scatter on this path.';
     }
+    if (qrss.label) {
+      says += '<br><b>' + qrss.label + '</b>: a ' + spread(qrss.bandwidth_hz) +
+              ' bin, ' + qrss.processing_gain_db.toFixed(0) + ' dB of processing gain';
+      if (qrss.waterfall_snr_db != null) {
+        says += ', so it reads ' + qrss.waterfall_snr_db.toFixed(0) + ' dB on the waterfall';
+      }
+      if (qrss.smeared) says += ' &mdash; but the path is wider than the bin, so it smears';
+    }
+    verdict.innerHTML = says;
     draw(body.spectrogram);
     audio.src = body.audio;
     audio.play().catch(() => {});

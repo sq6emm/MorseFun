@@ -13,7 +13,7 @@ from pathlib import Path
 from .cell import parse_character
 from .play import PlaybackError, describe_players, find_player, play
 from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, PROFILES
-from .render import Config, Render, render
+from .render import Config, Render, apply_qrss, render
 from .wav import write_wav
 
 DEFAULT_TEXT = "cq cq de sq6emm sq6emm k"
@@ -68,6 +68,17 @@ OVERRIDES = {
     "evolve": "evolve",
     "evolve_rate": "evolve_rate_hz",
     "qrm_scatter": "qrm_scatter",
+    "libration": "libration_deg_day",
+    "moon_distance": "moon_distance_km",
+    "range_rate": "moon_range_rate_mps",
+    "moon_accel": "moon_accel_mps2",
+    "moon_law": "moon_scatter_law",
+    "faraday": "faraday_db",
+    "doppler_track": "doppler_track",
+    "iono_modes": "iono_modes",
+    "layer_rate": "layer_rate_mps",
+    "layer_churn": "layer_turbulence_mps",
+    "takeoff": "takeoff_deg",
     "aurora_drift": "aurora_drift_mps",
     "aurora_spread": "aurora_spread_mps",
     "aurora_toward": "aurora_toward",
@@ -109,6 +120,10 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--effective-wpm", type=float, metavar="WPM",
                    help="Farnsworth: stretch the gaps to this overall speed")
     k.add_argument("--rise-ms", type=float, help="envelope rise and fall in ms (default: 5)")
+    k.add_argument("--qrss", type=float, metavar="SECONDS",
+                   help="QRSS: a dit this many seconds long, read off a waterfall "
+                        "instead of by ear (3, 10, 30, 60, 120). Slows the envelope "
+                        "down to match and drops the sample rate to 8 kHz")
 
     t = p.add_argument_group("tone")
     t.add_argument("--tone", type=float, help="tone frequency in Hz (default: 600)")
@@ -129,8 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
         "are alike; --seed brings one back.")
     w.add_argument("--band", metavar="FREQ",
                    help="operating frequency: 10G, 10.368GHz, 1296, 144M, 3cm (default: 10G)")
-    w.add_argument("--scatter", choices=("none", "rain", "snow", "aurora"),
-                   help="what the signal bounces off (default: none)")
+    w.add_argument("--scatter",
+                   choices=("none", "rain", "snow", "aurora", "iono", "skywave",
+                            "moon", "eme"),
+                   help="what the signal bounces off: weather, an auroral curtain, "
+                        "a low-band skywave hop (iono) or the Moon (eme)")
     w.add_argument("--rain-rate", type=float, metavar="MM_H", help="rain rate (default: 12)")
     w.add_argument("--snow-rate", type=float, metavar="MM_H",
                    help="snowfall, water equivalent (default: 4)")
@@ -179,6 +197,37 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how much of the time it is alive, 0..1 (default: 0.55)")
     w.add_argument("--aurora-burst", type=float, metavar="S",
                    help="length of a surge in seconds (default: 4)")
+    w.add_argument("--libration", type=float, metavar="DEG_DAY",
+                   help="EME: apparent rotation of the Moon, 0.2 (libration minimum) "
+                        "to 8; this sets the spread (default: drawn)")
+    w.add_argument("--moon-distance", type=float, metavar="KM",
+                   help="EME: 356500 at perigee to 406700 at apogee (default: drawn)")
+    w.add_argument("--range-rate", type=float, metavar="MPS",
+                   help="EME: how fast the Moon is closing, up to ±465 m/s, which is "
+                        "the self-Doppler (default: drawn)")
+    w.add_argument("--moon-accel", type=float, metavar="MPS2",
+                   help="EME: how fast that is changing; this is what slopes a QRSS "
+                        "trace across the screen")
+    w.add_argument("--moon-law", type=float, metavar="N",
+                   help="EME: cos^N scattering across the disc (default: drawn 1.5-3)")
+    w.add_argument("--faraday", type=float, metavar="DB",
+                   help="EME: depth of the polarisation fading (default: from the band, "
+                        "22 dB on 2 m, nothing on 10 GHz)")
+    w.add_argument("--no-doppler-track", dest="doppler_track", action="store_false",
+                   default=None,
+                   help="EME: do not follow the Doppler, so the trace slopes away")
+    w.add_argument("--echo-test", action="store_true",
+                   help="EME: hear your own keying as well, so the echo answers it "
+                        "2.5 s later (the same as --rician 6)")
+    w.add_argument("--iono-modes", type=int, metavar="N",
+                   help="low band: hops or magneto-ionic components arriving, 1 to 3")
+    w.add_argument("--layer-rate", type=float, metavar="MPS",
+                   help="low band: how fast the reflecting layer is moving, a few "
+                        "tenths overnight and metres a second at dawn")
+    w.add_argument("--layer-churn", type=float, metavar="MPS",
+                   help="low band: spread of those vertical motions")
+    w.add_argument("--takeoff", type=float, metavar="DEG",
+                   help="low band: take-off angle at the reflection point")
     w.add_argument("--rician", type=float, metavar="DB",
                    help="direct-to-scattered power ratio; the default -99 is pure scatter")
     w.add_argument("--doppler-shift", type=float, metavar="HZ",
@@ -238,6 +287,11 @@ def config_from_args(args: argparse.Namespace) -> Config:
         value = getattr(args, option, None)
         if value is not None:
             setattr(cfg, field, tuple(value) if isinstance(value, list) else value)
+    if getattr(args, "echo_test", False) and args.rician is None:
+        cfg.rician_db = 6.0        # your own keying, with the echo under it
+    if args.qrss is not None:
+        apply_qrss(cfg, args.qrss, keep_rise=args.rise_ms is not None,
+                   keep_rate=args.rate is not None)
     if args.no_noise:
         cfg.snr_db = None
     if args.no_limit:
@@ -270,10 +324,70 @@ def wrap(label: str, parts: list[str], indent: str = "            ",
     return lines
 
 
+def hz(value: float, signed: bool = False) -> str:
+    """A frequency, from hundreds of Hz down to milliHertz, legibly.
+
+    This program covers both a storm core spread over 300 Hz and a 2200 m
+    skywave trace two thousandths of a Hz wide; one format cannot do both.
+    """
+    value = float(value)
+    size = abs(value)
+    sign = "+" if signed else ""
+    if size >= 100:
+        return f"{value:{sign}.0f} Hz"
+    if size >= 10:
+        return f"{value:{sign}.1f} Hz"
+    if size >= 1:
+        return f"{value:{sign}.2f} Hz"
+    if size >= 0.01:
+        return f"{value:{sign}.3f} Hz"
+    return f"{value * 1000:{sign}.2f} mHz"
+
+
+def wavelength(mm: float) -> str:
+    return f"{mm / 1000.0:.1f} m" if mm >= 1000 else f"{mm:.1f} mm"
+
+
+def per_mps(value: float) -> str:
+    if value >= 10:
+        return f"{value:.0f} Hz per m/s"
+    if value >= 0.1:
+        return f"{value:.2f} Hz per m/s"
+    return f"{value * 1000:.2f} mHz per m/s"
+
+
+def minutes(seconds: float) -> str:
+    return f"{seconds:.0f} s" if seconds < 180 else f"{seconds / 60:.0f} min"
+
+
+def describe_qrss(qrss: dict, bandwidth: float, asked: float | None) -> list[str]:
+    """What QRSS buys, and what the path takes back off it."""
+    if not qrss:
+        return []
+    lines = wrap(f"  qrss      {qrss['label']}: ", [
+        f"dit {qrss['dit_s']:g} s",
+        f"read in a bin {hz(qrss['bandwidth_hz'])} wide",
+        f"{qrss['processing_gain_db']:+.0f} dB on the {bandwidth:.0f} Hz filter",
+    ])
+    if qrss.get("waterfall_snr_db") is not None:
+        asked_db = f"S/N {asked:+.0f} dB" if asked is not None else "the signal"
+        lines.append(f"            so {asked_db} in the filter reads "
+                     f"{qrss['waterfall_snr_db']:+.0f} dB on the waterfall")
+    drift = float(qrss.get("drift_hz") or 0.0)
+    if drift > qrss["bandwidth_hz"]:
+        lines.append(f"            the rig's own \u00b1{hz(drift)} of drift is "
+                     f"{drift / qrss['bandwidth_hz']:.0f} bins wide: lock it, or the "
+                     "trace wanders off its own line")
+    if qrss.get("smeared"):
+        lines.append(f"            the path is wider than the bin, so the trace smears "
+                     f"and {qrss['smear_db']:+.1f} dB of that goes")
+    return lines
+
+
 def describe_scatter(meta: dict, scatter: dict) -> list[str]:
     """The propagation half of the report: the path, the cloud, the verdict."""
-    lines = [f"  path      {meta['band']}, \u03bb {meta['wavelength_mm']:.1f} mm, "
-             f"{meta['hz_per_mps']:.0f} Hz per m/s"]
+    lines = [f"  path      {meta['band']}, \u03bb {wavelength(meta['wavelength_mm'])}, "
+             f"{per_mps(meta['hz_per_mps'])}"]
     geometry = scatter.get("geometry")
     if geometry:
         volume = "\u00d7".join(f"{v:g}" for v in geometry["volume_km"])
@@ -290,11 +404,16 @@ def describe_scatter(meta: dict, scatter: dict) -> list[str]:
     head = f"{scatter.get('cell', '')} {scatter['kind']}".strip()
     if "rate_mm_h" in scatter:
         head += f" {scatter['rate_mm_h']:.3g} mm/h, {scatter['dbz']:.0f} dBZ"
+    if scatter["kind"] == "moon":
+        head += f" at {scatter['distance_km']:,.0f} km"
+    if scatter["kind"] == "skywave":
+        head += f", {len(scatter.get('modes', []))} mode(s)"
     tuned = scatter.get("tuned_out_hz") or 0.0
-    doppler = (f"Doppler {tuned:+.0f} Hz tuned out" if tuned
-               else f"Doppler {scatter['shift_hz']:+.0f} Hz")
+    tracked = "tracked out" if scatter.get("tracking") else "tuned out"
+    doppler = (f"Doppler {hz(tuned, signed=True)} {tracked}" if tuned
+               else f"Doppler {hz(scatter['shift_hz'], signed=True)}")
     lines.append(f"  scatter   {head}: {doppler}, spread "
-                 f"{scatter['spread_hz']:.0f} Hz, "
+                 f"{hz(scatter['spread_hz'])}, "
                  f"{scatter['audible_fraction'] * 100:.0f}% inside the filter")
     if scatter.get("sounds_like"):
         lines.append(f"            \u2014 {scatter['sounds_like']}")
@@ -304,6 +423,37 @@ def describe_scatter(meta: dict, scatter: dict) -> list[str]:
         detail = [f"{c['shift_hz']:+.0f} Hz/{c['spread_hz']:.0f} Hz "
                   f"at {c['level_db']:+.0f} dB" for c in cores]
         lines.extend(wrap(f"            {len(cores)} cores  ", detail))
+
+    if scatter["kind"] == "moon":
+        lines.extend(wrap("            ", [
+            f"the echo is {scatter['delay_s']:.2f} s late",
+            f"libration {scatter['libration_deg_day']:.2f}\u00b0 a day, "
+            f"limb {hz(scatter['limb_hz'])}",
+            f"{scatter['scatterers']} patches, cos^{scatter['scatter_law']:.1f} "
+            "across the disc",
+        ]))
+        drift = [f"own Doppler {hz(scatter['own_doppler_hz'], signed=True)}",
+                 f"drifting {hz(scatter['drift_hz_s'], signed=True)} a second"]
+        drift.append("both followed" if scatter.get("tracking")
+                     else "the drift left in, so the trace slopes")
+        if (scatter.get("faraday_db") or 0) > 0.5:
+            drift.append(f"Faraday {scatter['faraday_db']:.0f} dB nulls every "
+                         f"{minutes(scatter['faraday_period_s'])}")
+        lines.extend(wrap("            ", drift))
+        return lines + _budget(scatter)
+
+    if scatter["kind"] == "skywave":
+        rise = scatter["height_rate_mps"]
+        detail = [
+            f"layer {'rising' if rise >= 0 else 'falling'} {abs(rise):.2f} m/s at "
+            f"{scatter['elevation_deg']:.0f}\u00b0 take-off",
+            f"wandering {hz(scatter['wander_hz'])}",
+        ]
+        if len(scatter.get("modes", [])) > 1:
+            detail.append(f"modes {hz(scatter['between_hz'])} apart, so it fades every "
+                          f"{minutes(scatter['fade_period_s'])}")
+        lines.extend(wrap("            ", detail))
+        return lines + _budget(scatter)
 
     sampled = [f"{scatter['scatterers']} scatterers"]
     if "median_drop_mm" in scatter:
@@ -329,6 +479,12 @@ def describe_scatter(meta: dict, scatter: dict) -> list[str]:
         sampled.append("Doppler set by hand")
     lines.extend(wrap("            ", sampled))
 
+    return lines + _budget(scatter)
+
+
+def _budget(scatter: dict) -> list[str]:
+    """What the path did to the signal level, in dB, and the honest warnings."""
+    lines: list[str] = []
     budget = []
     if scatter.get("level_offset_db"):
         budget.append(f"reflectivity {scatter['level_offset_db']:+.1f} dB")
@@ -353,12 +509,15 @@ def describe(result: Render, heading: str, profile: str) -> str:
     lines.append(f"  code      {code if len(code) <= 96 else code[:93] + '...'}")
     spacing = (f"Farnsworth to {m['effective_wpm']:.0f} wpm"
                if m["farnsworth"] else "standard spacing")
-    lines.append(f"  keying    {m['wpm']:.0f} wpm, dit {m['dit_ms']:.1f} ms, {spacing}")
+    speed = f"{m['wpm']:.2f} wpm" if m["wpm"] < 5 else f"{m['wpm']:.0f} wpm"
+    dit = (f"dit {m['dit_ms'] / 1000.0:g} s" if m["dit_ms"] >= 1000
+           else f"dit {m['dit_ms']:.1f} ms")
+    lines.append(f"  keying    {speed}, {dit}, {spacing}")
     cfg = m["config"]
     tone = f"  tone      {m['tone_hz']:.0f} Hz"
     extras = []
     if cfg["drift_hz"]:
-        extras.append(f"drift ±{cfg['drift_hz']:.1f} Hz")
+        extras.append(f"drift ±{hz(cfg['drift_hz'])}")
     if cfg["qsb_db"]:
         extras.append(f"QSB {cfg['qsb_db']:.0f} dB")
     if cfg["hum_depth"]:
@@ -384,6 +543,8 @@ def describe(result: Render, heading: str, profile: str) -> str:
         noise = m["noise"] or {}
         for note in list(noise.get("qrm", [])) + list(noise.get("birdies", [])):
             lines.append(f"            {note}")
+    lines.extend(describe_qrss(m.get("qrss") or {}, float(cfg["bandwidth"]),
+                               m.get("effective_snr_db")))
     if m["unknown"]:
         lines.append(f"  skipped   {' '.join(m['unknown'])} (no Morse equivalent)")
     size = (result.samples.size * 2 + 44) / 1024

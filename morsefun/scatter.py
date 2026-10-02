@@ -384,3 +384,56 @@ def evolving_channel(
         return np.zeros(n, dtype=np.complex128)
     return out / np.sqrt(power)
 
+
+@dataclass
+class Carrier:
+    """A path that arrives coherently: one tone, wandering slowly.
+
+    Volume scatter is diffuse and belongs in :class:`EvolvingSpectrum`, but a
+    skywave hop off a layer is not: it arrives as a carrier, and what the
+    ionosphere does to it is move it about by milliHertz.  Two of them at
+    slightly different Doppler beat against each other, which is the slow QSB
+    on every low-band QRSS screen -- it comes out of the sum, not out of a
+    fading model.
+    """
+
+    shift_hz: float = 0.0
+    spread_hz: float = 0.0        # rms of its frequency wander
+    wander_rate_hz: float = 0.01  # how fast it wanders
+    level: float = 1.0            # amplitude, before normalising
+    fade_db: float = 0.0          # slow fading of its own
+    fade_rate_hz: float = 0.01
+
+
+def coherent_channel(
+    n: int, sample_rate: int, carriers: list[Carrier], rng: np.random.Generator,
+    ticks_hz: float = 20.0,
+) -> np.ndarray:
+    """Sum of slowly wandering carriers, normalised to unit mean power.
+
+    The wander is drawn at a few ticks a second and interpolated, because
+    nothing here changes faster than that and a message in QRSS runs for
+    minutes: there is no point building milliHertz noise at the sample rate.
+    """
+    if n <= 0 or not carriers:
+        return np.zeros(max(n, 0), dtype=np.complex128)
+    ticks = max(int(n / sample_rate * max(ticks_hz, 0.5)) + 2, 8)
+    coarse = np.linspace(0.0, n / sample_rate, ticks)
+    t = np.arange(n) / sample_rate
+    out = np.zeros(n, dtype=np.complex128)
+    for carrier in carriers:
+        wander = np.clip(smooth_noise(ticks, ticks / max(coarse[-1], 1e-9),
+                                      max(carrier.wander_rate_hz, 1e-4), rng), -3.0, 3.0)
+        freq = carrier.shift_hz + carrier.spread_hz * np.interp(t, coarse, wander)
+        amplitude = np.full(n, float(carrier.level))
+        if carrier.fade_db > 0:
+            swing = np.clip(smooth_noise(ticks, ticks / max(coarse[-1], 1e-9),
+                                         max(carrier.fade_rate_hz, 1e-4), rng), -2.5, 2.5)
+            fade = carrier.fade_db * (np.interp(t, coarse, swing) / 2.5 - 1.0) / 2.0
+            amplitude = amplitude * np.power(10.0, fade / 20.0)
+        phase = 2 * np.pi * np.cumsum(freq) / sample_rate + rng.uniform(0, 2 * np.pi)
+        out += amplitude * np.exp(1j * phase)
+    power = float(np.mean(np.abs(out) ** 2))
+    if power <= 1e-30:
+        return np.zeros(n, dtype=np.complex128)
+    return out / np.sqrt(power)

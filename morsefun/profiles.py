@@ -69,6 +69,40 @@ PROFILES: dict[str, dict[str, object]] = {
         "snr_db": 10.0, "crash_rate": 0.05, "qrm_count": 0, "qsb_db": 1.0,
         "drift_hz": 1.0, "scintillation_db": 4.0,
     },
+    # QRSS: a dit of three seconds, read off a waterfall.  Nothing here is
+    # listened to by ear, so the signal is allowed to sit below the noise: what
+    # matters is that it is narrow, and that the path keeps it narrow.
+    "lf-qrss": {
+        "scatter": "iono", "band": "137.5k", "wpm": 0.4, "rise_ms": 200.0,
+        "sample_rate": 8000, "snr_db": -12.0, "bandwidth": 200.0,
+        "crash_rate": 5.0, "crash_db": 28.0, "tilt": 1.0, "qrm_count": 0,
+        "qsb_db": 0.0, "drift_hz": 0.02, "drift_rate": 0.002,
+        "hum_depth": 0.06, "birdie_count": 1, "birdie_db": 2.0,
+    },
+    "mf-qrss": {
+        "scatter": "iono", "band": "474k", "wpm": 0.4, "rise_ms": 200.0,
+        "sample_rate": 8000, "snr_db": -10.0, "bandwidth": 200.0,
+        "crash_rate": 3.0, "crash_db": 26.0, "tilt": 0.8, "qrm_count": 0,
+        "qsb_db": 0.0, "drift_hz": 0.05, "drift_rate": 0.002,
+        "hum_depth": 0.03, "birdie_count": 1, "birdie_db": 2.0,
+    },
+    "30m-qrss": {
+        "scatter": "iono", "band": "10.14M", "wpm": 0.4, "rise_ms": 200.0,
+        "sample_rate": 8000, "snr_db": -8.0, "bandwidth": 300.0,
+        "crash_rate": 0.8, "crash_db": 20.0, "qrm_count": 1, "qsb_db": 0.0,
+        "drift_hz": 0.3, "drift_rate": 0.003, "birdie_count": 1,
+    },
+    "eme-qrss": {
+        "scatter": "moon", "band": "144M", "wpm": 0.4, "rise_ms": 200.0,
+        "sample_rate": 8000, "snr_db": -6.0, "bandwidth": 300.0,
+        "crash_rate": 0.2, "qrm_count": 0, "qsb_db": 0.0, "drift_hz": 0.05,
+        "drift_rate": 0.002,
+    },
+    "eme": {
+        "scatter": "moon", "band": "144M", "wpm": 12.0, "snr_db": 3.0,
+        "bandwidth": 300.0, "crash_rate": 0.3, "qrm_count": 0, "qsb_db": 0.0,
+        "drift_hz": 1.0,
+    },
     "aurora": {
         "scatter": "aurora", "band": "144M", "snr_db": 12.0, "crash_rate": 0.3,
         "qrm_count": 1, "qsb_db": 0.0, "drift_hz": 0.0, "scintillation_db": 3.0,
@@ -96,4 +130,9 @@ DESCRIPTIONS: dict[str, str] = {
     "dry-snow": "10 GHz off dry snow: narrow, wind-shifted and very weak",
     "wet-snow": "10 GHz off the melting layer: the bright band, much stronger",
     "aurora": "aurora on 2 m, where it works: hoarse, bursty, shifted down",
+    "lf-qrss": "2200 m QRSS3: a trace like a hair, under heavy static",
+    "mf-qrss": "630 m QRSS3: still razor thin, a little more layer motion",
+    "30m-qrss": "30 m QRSS3: the knights' band, fuzzy and wandering",
+    "eme-qrss": "2 m EME QRSS3: the echo 2.5 s late, libration and Faraday",
+    "eme": "2 m moonbounce at 12 wpm: hollow, fluttery, 2.5 s behind you",
 }

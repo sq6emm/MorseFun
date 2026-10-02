@@ -67,6 +67,8 @@ class Band:
             return f"{self.hz / 1e9:.6g} GHz"
         if self.hz >= 1e6:
             return f"{self.hz / 1e6:.6g} MHz"
+        if self.hz >= 1e3:
+            return f"{self.hz / 1e3:.6g} kHz"
         return f"{self.hz:.0f} Hz"
 
     def doppler_hz(self, velocity_mps: float | np.ndarray) -> float | np.ndarray:
