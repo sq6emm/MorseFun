@@ -7,54 +7,70 @@
 <style>
   :root {
     --bg: #0d1117; --panel: #151b23; --line: #263040; --ink: #dbe3ee;
-    --dim: #8c9ab0; --hot: #7fd1ff; --warm: #ffd479; --ok: #7ee2a8;
+    --dim: #8c9ab0; --hot: #7fd1ff; --warm: #ffd479; --sel: #16303f;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: light) {
     :root { --bg: #f4f6fa; --panel: #ffffff; --line: #d8dee9; --ink: #1b2430;
-            --dim: #5d6a7d; --hot: #0a6fa8; --warm: #9a6500; --ok: #0f7a4d; }
+            --dim: #5d6a7d; --hot: #0a6fa8; --warm: #9a6500; --sel: #e4f2fb; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5
          system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  header { padding: 22px 16px 6px; max-width: 1180px; margin: 0 auto; }
+  header { padding: 22px 16px 6px; max-width: 1240px; margin: 0 auto; }
   h1 { margin: 0; font-size: 1.45rem; letter-spacing: .02em; }
   h1 span { color: var(--hot); }
-  .lede { color: var(--dim); margin: 6px 0 0; max-width: 62ch; }
-  main { max-width: 1180px; margin: 0 auto; padding: 16px;
-         display: grid; gap: 16px; grid-template-columns: minmax(0, 360px) minmax(0, 1fr); }
-  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .lede { color: var(--dim); margin: 6px 0 0; max-width: 68ch; }
+  main { max-width: 1240px; margin: 0 auto; padding: 16px;
+         display: grid; gap: 16px; grid-template-columns: minmax(0, 400px) minmax(0, 1fr); }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
   .panel { background: var(--panel); border: 1px solid var(--line);
            border-radius: 12px; padding: 14px; }
   fieldset { border: 0; padding: 0; margin: 0 0 14px; }
-  legend { padding: 0; font-size: .74rem; letter-spacing: .09em; text-transform: uppercase;
-           color: var(--dim); margin-bottom: 8px; }
+  legend, .legend { padding: 0; font-size: .74rem; letter-spacing: .09em;
+                    text-transform: uppercase; color: var(--dim); margin-bottom: 8px; }
   label { display: block; font-size: .8rem; color: var(--dim); margin-bottom: 2px; }
   .row { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; margin-bottom: 8px; }
   .row.three { grid-template-columns: 1fr 1fr 1fr; }
   input, select, textarea, button {
     font: inherit; color: var(--ink); background: var(--bg);
     border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; width: 100%; }
-  textarea { font-family: var(--mono); resize: vertical; min-height: 68px; }
+  textarea { font-family: var(--mono); resize: vertical; min-height: 60px; }
   input:focus, select:focus, textarea:focus { outline: 2px solid var(--hot); outline-offset: -1px; }
+  input::placeholder { color: var(--dim); opacity: .75; }
   .check { display: flex; align-items: center; gap: 8px; color: var(--ink);
            font-size: .85rem; margin: 6px 0; }
   .check input { width: auto; }
-  .buttons { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; margin-top: 4px; }
   button { cursor: pointer; font-weight: 600; }
+  .bands { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .bands button { width: auto; padding: 6px 11px; font-size: .85rem; font-weight: 600;
+                  color: var(--dim); }
+  .bands button[aria-pressed="true"] { color: var(--ink); border-color: var(--hot);
+                                        background: var(--sel); }
+  .modes { display: grid; gap: 6px; margin: 10px 0 4px; }
+  .mode { text-align: left; width: 100%; padding: 8px 10px; line-height: 1.35;
+          display: grid; gap: 2px; font-weight: 400; }
+  .mode[aria-pressed="true"] { border-color: var(--hot); background: var(--sel); }
+  .mode b { font-weight: 650; }
+  .mode .tags { font-family: var(--mono); font-size: .72rem; color: var(--hot); }
+  .mode .about { font-size: .79rem; color: var(--dim); }
+  details { border-top: 1px solid var(--line); padding-top: 10px; margin-bottom: 12px; }
+  details summary { cursor: pointer; font-size: .74rem; letter-spacing: .09em;
+                    text-transform: uppercase; color: var(--dim); margin-bottom: 10px; }
+  .buttons { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
   button.go { grid-column: 1 / -1; background: var(--hot); border-color: var(--hot);
               color: #04121c; padding: 10px; }
   button:disabled { opacity: .55; cursor: progress; }
-  .hint { color: var(--dim); font-size: .76rem; margin: 4px 0 0; }
+  .hint { color: var(--dim); font-size: .78rem; margin: 4px 0 0; }
+  .hint.warn { color: var(--warm); }
   audio { width: 100%; margin-bottom: 10px; }
   canvas { width: 100%; height: 190px; display: block; border-radius: 8px;
-           image-rendering: auto;
            border: 1px solid var(--line); background: #05080c; }
   .axis { display: flex; justify-content: space-between; color: var(--dim);
           font-size: .72rem; margin: 4px 0 12px; font-family: var(--mono); }
   pre { font-family: var(--mono); font-size: .8rem; white-space: pre-wrap;
         margin: 0; color: var(--ink); }
-  .verdict { font-size: 1.05rem; margin: 0 0 10px; }
+  .verdict { font-size: 1.02rem; margin: 0 0 10px; }
   .verdict b { color: var(--warm); }
   .meta { color: var(--dim); font-size: .78rem; font-family: var(--mono);
           display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 0 0; }
@@ -65,99 +81,99 @@
 </head>
 <body>
 <header>
-  <h1>Morse<span>Fun</span> &mdash; live off a rain cell</h1>
-  <p class="lede">Key a message and hear it come back off weather on 10 GHz, off
-  a layer on 2200 m, or off the Moon. Every render draws a different path &mdash;
-  a cell's cores and the angle both stations look into it, a reflecting layer
-  that will not hold still, a libration rate &mdash; so press <em>another
-  front</em> a few times: the same rain never sounds the same twice. At QRSS
-  speeds nothing is listened to by ear: watch the trace instead.</p>
+  <h1>Morse<span>Fun</span></h1>
+  <p class="lede">Morse code the way a band actually delivers it. Pick where you
+  are &mdash; 2200 m, HF, 2 m, 10 GHz &mdash; then pick how the signal got there:
+  a skywave hop, an auroral curtain, a rain cell, an airliner, the Moon. Every
+  render draws that path afresh, so the same mode never sounds quite the same
+  twice, and the report says what it drew and why it sounds like that.</p>
 </header>
 
 <main>
   <form class="panel" id="form">
+    <input type="hidden" name="profile" id="profile">
+    <div class="legend">band</div>
+    <div class="bands" id="bands"></div>
+    <p class="hint" id="groupAbout"></p>
+    <div class="modes" id="modes"></div>
+
     <fieldset>
       <legend>message</legend>
       <textarea id="text" name="text" spellcheck="false">cq cq de sq6emm sq6emm k</textarea>
       <div class="row three">
-        <div><label for="wpm">wpm</label><input id="wpm" name="wpm" type="number" min="5" max="60" step="1" value="23"></div>
-        <div><label for="effective_wpm">farnsworth</label><input id="effective_wpm" name="effective_wpm" type="number" min="5" max="60" step="1" placeholder="off"></div>
-        <div><label for="tone">tone Hz</label><input id="tone" name="tone" type="number" min="200" max="1500" step="10" value="600"></div>
+        <div><label for="wpm">wpm</label><input id="wpm" name="wpm" type="number" min="0.1" max="60" step="1" placeholder="profile"></div>
+        <div><label for="qrss">QRSS dit s</label><select id="qrss" name="qrss"></select></div>
+        <div><label for="tone">tone Hz</label><input id="tone" name="tone" type="number" min="200" max="1500" step="10" placeholder="600"></div>
       </div>
+      <p class="hint" id="speedNote"></p>
     </fieldset>
 
-    <fieldset>
-      <legend>conditions</legend>
-      <label for="profile">profile</label>
-      <select id="profile" name="profile"></select>
-      <p class="hint" id="about"></p>
+    <details>
+      <summary>the path &mdash; blank means the profile decides, or draws</summary>
       <div class="row">
-        <div><label for="scatter">scatter</label><select id="scatter" name="scatter"></select></div>
-        <div><label for="band">band</label><input id="band" name="band" placeholder="10G"></div>
-      </div>
-    </fieldset>
-
-    <fieldset>
-      <legend>slow modes</legend>
-      <div class="row">
-        <div><label for="qrss">QRSS dit</label><select id="qrss" name="qrss"></select></div>
-        <div><label for="libration">libration &deg;/day</label><input id="libration" name="libration" type="number" min="0.2" max="8" step="0.1" placeholder="auto"></div>
+        <div><label for="band">band</label><input id="band" name="band" placeholder="profile"></div>
+        <div><label for="scatter">path</label><select id="scatter" name="scatter"></select></div>
       </div>
       <div class="row three">
-        <div><label for="layer_rate">layer m/s</label><input id="layer_rate" name="layer_rate" type="number" min="-5" max="5" step="0.1" placeholder="auto"></div>
-        <div><label for="takeoff">take-off&deg;</label><input id="takeoff" name="takeoff" type="number" min="5" max="80" step="5" placeholder="auto"></div>
-        <div><label for="iono_modes">hops</label><input id="iono_modes" name="iono_modes" type="number" min="1" max="3" step="1" placeholder="auto"></div>
-      </div>
-      <label class="check"><input type="checkbox" id="echo_test" name="echo_test"> EME echo test: hear your own keying, then the Moon</label>
-      <label class="check"><input type="checkbox" id="doppler_off" name="doppler_off"> do not follow the Doppler, let the trace slope</label>
-    </fieldset>
-
-    <fieldset>
-      <legend>the cell &mdash; blank means drawn</legend>
-      <div class="row">
-        <div><label for="cell">character</label><select id="cell" name="cell"></select></div>
-        <div><label for="cores">cores</label><input id="cores" name="cores" type="number" min="1" max="4" step="1" placeholder="auto"></div>
-      </div>
-      <div class="row">
-        <div><label for="rain_rate">rain mm/h</label><input id="rain_rate" name="rain_rate" type="number" min="0.2" max="150" step="0.5" placeholder="auto"></div>
-        <div><label for="snow_rate">snow mm/h</label><input id="snow_rate" name="snow_rate" type="number" min="0.2" max="20" step="0.5" placeholder="auto"></div>
+        <div><label for="cell">rain cell</label><select id="cell" name="cell"></select></div>
+        <div><label for="rain_rate">rain mm/h</label><input id="rain_rate" name="rain_rate" type="number" min="0.2" max="150" step="0.5" placeholder="drawn"></div>
+        <div><label for="snow_rate">snow mm/h</label><input id="snow_rate" name="snow_rate" type="number" min="0.2" max="20" step="0.5" placeholder="drawn"></div>
       </div>
       <div class="row three">
-        <div><label for="elevation">elev&deg;</label><input id="elevation" name="elevation" type="number" min="0.5" max="45" step="0.5" placeholder="auto"></div>
-        <div><label for="squint">squint&deg;</label><input id="squint" name="squint" type="number" min="0" max="60" step="1" placeholder="auto"></div>
+        <div><label for="elevation">elev&deg;</label><input id="elevation" name="elevation" type="number" min="0.5" max="45" step="0.5" placeholder="drawn"></div>
+        <div><label for="squint">squint&deg;</label><input id="squint" name="squint" type="number" min="0" max="60" step="1" placeholder="drawn"></div>
         <div><label for="path_km">rain km</label><input id="path_km" name="path_km" type="number" min="0" max="60" step="1" placeholder="0"></div>
       </div>
       <div class="row three">
-        <div><label for="updraft">lift m/s</label><input id="updraft" name="updraft" type="number" min="-18" max="20" step="1" placeholder="auto"></div>
-        <div><label for="turbulence">churn m/s</label><input id="turbulence" name="turbulence" type="number" min="0" max="10" step="0.5" placeholder="auto"></div>
-        <div><label for="shear">shear /km</label><input id="shear" name="shear" type="number" min="0" max="40" step="1" placeholder="auto"></div>
+        <div><label for="updraft">lift m/s</label><input id="updraft" name="updraft" type="number" min="-18" max="20" step="1" placeholder="drawn"></div>
+        <div><label for="turbulence">churn m/s</label><input id="turbulence" name="turbulence" type="number" min="0" max="10" step="0.5" placeholder="drawn"></div>
+        <div><label for="shear">shear /km</label><input id="shear" name="shear" type="number" min="0" max="40" step="1" placeholder="drawn"></div>
+      </div>
+      <div class="row three">
+        <div><label for="libration">libration &deg;/day</label><input id="libration" name="libration" type="number" min="0.2" max="8" step="0.1" placeholder="drawn"></div>
+        <div><label for="layer_rate">layer m/s</label><input id="layer_rate" name="layer_rate" type="number" min="-5" max="5" step="0.1" placeholder="drawn"></div>
+        <div><label for="iono_modes">hops</label><input id="iono_modes" name="iono_modes" type="number" min="1" max="3" step="1" placeholder="drawn"></div>
+      </div>
+      <div class="row three">
+        <div><label for="baseline_km">path km</label><input id="baseline_km" name="baseline_km" type="number" min="20" max="900" step="10" placeholder="drawn"></div>
+        <div><label for="altitude">plane km</label><input id="altitude" name="altitude" type="number" min="1" max="14" step="0.5" placeholder="drawn"></div>
+        <div><label for="plane_speed">plane m/s</label><input id="plane_speed" name="plane_speed" type="number" min="50" max="320" step="10" placeholder="drawn"></div>
       </div>
       <label class="check"><input type="checkbox" id="snow_wet" name="snow_wet"> wet snow (the bright band)</label>
-      <label class="check"><input type="checkbox" id="evolve_off" name="evolve_off"> hold the cell still</label>
-      <label class="check"><input type="checkbox" id="qrm_direct" name="qrm_direct"> other stations come in direct</label>
-    </fieldset>
+      <label class="check"><input type="checkbox" id="echo_test" name="echo_test"> EME echo test: hear your own keying, then the Moon</label>
+      <label class="check"><input type="checkbox" id="doppler_off" name="doppler_off"> do not follow the EME Doppler, let the trace slope</label>
+      <label class="check"><input type="checkbox" id="evolve_off" name="evolve_off"> hold the rain cell still</label>
+      <label class="check"><input type="checkbox" id="qrm_direct" name="qrm_direct"> other stations come in direct, not off the cell</label>
+    </details>
 
-    <fieldset>
-      <legend>the band</legend>
+    <details>
+      <summary>the band</summary>
       <div class="row three">
-        <div><label for="snr">S/N dB</label><input id="snr" name="snr" type="number" min="-10" max="40" step="1" placeholder="auto"></div>
-        <div><label for="bandwidth">filter Hz</label><input id="bandwidth" name="bandwidth" type="number" min="100" max="3000" step="50" placeholder="500"></div>
-        <div><label for="qrn">QRN /s</label><input id="qrn" name="qrn" type="number" min="0" max="12" step="0.1" placeholder="auto"></div>
+        <div><label for="snr">S/N dB</label><input id="snr" name="snr" type="number" min="-30" max="40" step="1" placeholder="profile"></div>
+        <div><label for="bandwidth">filter Hz</label><input id="bandwidth" name="bandwidth" type="number" min="100" max="3000" step="50" placeholder="profile"></div>
+        <div><label for="qrn">QRN /s</label><input id="qrn" name="qrn" type="number" min="0" max="12" step="0.1" placeholder="profile"></div>
       </div>
       <div class="row three">
-        <div><label for="qrm">QRM</label><input id="qrm" name="qrm" type="number" min="0" max="5" step="1" placeholder="auto"></div>
-        <div><label for="birdies">birdies</label><input id="birdies" name="birdies" type="number" min="0" max="4" step="1" placeholder="auto"></div>
+        <div><label for="qrm">QRM</label><input id="qrm" name="qrm" type="number" min="0" max="5" step="1" placeholder="profile"></div>
+        <div><label for="qsb">QSB dB</label><input id="qsb" name="qsb" type="number" min="0" max="30" step="1" placeholder="profile"></div>
+        <div><label for="drift">drift Hz</label><input id="drift" name="drift" type="number" min="0" max="20" step="0.1" placeholder="profile"></div>
+      </div>
+      <div class="row three">
+        <div><label for="birdies">birdies</label><input id="birdies" name="birdies" type="number" min="0" max="4" step="1" placeholder="profile"></div>
+        <div><label for="rate">sample Hz</label><input id="rate" name="rate" type="number" min="4000" max="48000" step="1000" placeholder="profile"></div>
         <div><label for="seed">seed</label><input id="seed" name="seed" type="number" placeholder="random"></div>
       </div>
       <label class="check"><input type="checkbox" id="no_noise" name="no_noise"> no band at all, just the signal</label>
-    </fieldset>
+    </details>
 
     <div class="buttons">
       <button class="go" type="submit">Send it</button>
-      <button type="button" id="again">Another front</button>
-      <button type="button" id="repeat">Same front again</button>
+      <button type="button" id="again">Another one like it</button>
+      <button type="button" id="clear">Clear the knobs</button>
     </div>
-    <p class="hint">Ctrl+Enter sends. A seed brings a front back exactly.</p>
+    <p class="hint">Ctrl+Enter sends. Every blank control follows the profile, and
+    the profile draws what it does not pin, so <em>another one like it</em> is a
+    different cloud, cell or moonrise with the same settings. A seed brings one back.</p>
   </form>
 
   <section class="panel">
@@ -165,7 +181,7 @@
     <p class="verdict" id="verdict"><span class="placeholder">Nothing on the band yet.</span></p>
     <canvas id="scope" width="520" height="190"></canvas>
     <div class="axis"><span id="axisLow"></span><span id="axisTime"></span><span id="axisHigh"></span></div>
-    <pre id="report"><span class="placeholder">The report lands here: the geometry, the cores, the budget.</span></pre>
+    <pre id="report"><span class="placeholder">The report lands here: the path, what it drew, and the budget.</span></pre>
     <div class="meta" id="meta"></div>
   </section>
 </main>
@@ -177,70 +193,93 @@ const report = document.getElementById('report');
 const verdict = document.getElementById('verdict');
 const metaBar = document.getElementById('meta');
 const scope = document.getElementById('scope');
-const about = document.getElementById('about');
-let profiles = [];
+let groups = [];
+let current = null;          // the selected profile card
 
-function fill(select, values, chosen) {
+function fill(select, values, blankAs) {
   select.innerHTML = '';
   for (const value of values) {
     const option = document.createElement('option');
-    option.value = (value === 'auto' || value === 'as the profile'
-                    || value === 'off') ? '' : value;
+    option.value = (value === blankAs) ? '' : value;
     option.textContent = value;
-    if (value === chosen) option.selected = true;
     select.append(option);
   }
 }
 
 async function boot() {
   const options = await (await fetch('api/options')).json();
-  profiles = options.profiles;
-  const select = document.getElementById('profile');
-  for (const profile of profiles) {
-    const option = document.createElement('option');
-    option.value = profile.name;
-    option.textContent = profile.name;
-    if (profile.name === 'rain-scatter') option.selected = true;
-    select.append(option);
-  }
-  // An empty value means "whatever the profile says".
-  fill(document.getElementById('scatter'), ['as the profile', ...options.scatter],
-       'as the profile');
-  fill(document.getElementById('cell'), options.characters, 'auto');
+  groups = options.groups;
+  fill(document.getElementById('scatter'), ['as the profile', ...options.scatter], 'as the profile');
+  fill(document.getElementById('cell'), ['auto', ...options.characters.filter(c => c !== 'auto')], 'auto');
   fill(document.getElementById('qrss'), ['off', ...options.qrss.map(String)], 'off');
-  describeProfile();
+
+  const bands = document.getElementById('bands');
+  groups.forEach((group, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = group.name;
+    button.onclick = () => showGroup(index);
+    bands.append(button);
+  });
+  showGroup(3);                                  // the microwave bands, to start
   send();
 }
 
-function describeProfile() {
-  const name = document.getElementById('profile').value;
-  const found = profiles.find(p => p.name === name);
-  about.textContent = found ? found.about : '';
+function showGroup(index) {
+  const group = groups[index];
+  [...document.getElementById('bands').children].forEach((button, at) =>
+    button.setAttribute('aria-pressed', at === index ? 'true' : 'false'));
+  document.getElementById('groupAbout').textContent = group.about;
+  const modes = document.getElementById('modes');
+  modes.innerHTML = '';
+  for (const card of group.profiles) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'mode';
+    button.innerHTML = '<b>' + card.name + '</b><span class="tags">' +
+      [card.band, card.mode, card.speed].join(' &middot; ') +
+      '</span><span class="about">' + card.about + '</span>';
+    button.onclick = () => { choose(card); send(); };
+    modes.append(button);
+  }
+  choose(group.profiles[0]);
 }
-document.getElementById('profile').addEventListener('change', () => {
-  describeProfile();
-  document.getElementById('scatter').value = '';
-  send();
-});
+
+function choose(card) {
+  current = card;
+  document.getElementById('profile').value = card.name;
+  [...document.getElementById('modes').children].forEach(button =>
+    button.setAttribute('aria-pressed',
+      button.querySelector('b').textContent === card.name ? 'true' : 'false'));
+  // Show what the profile is going to do, as placeholders, and send nothing:
+  // a form that insists on its own wpm would key QRSS at 23 words a minute.
+  for (const [key, value] of Object.entries(card.defaults)) {
+    const field = form.elements[key];
+    if (!field || field.type === 'checkbox') continue;
+    const shown = typeof value === 'number' ? String(+value.toFixed(3)) : String(value);
+    if (field.tagName === 'SELECT') field.options[0].textContent = shown;
+    else field.placeholder = shown;
+  }
+  const dit = card.defaults.qrss;
+  document.getElementById('speedNote').className = dit ? 'hint warn' : 'hint';
+  document.getElementById('speedNote').textContent = dit
+    ? 'QRSS: one dit lasts ' + dit + ' s, so even a short message runs for minutes. '
+      + 'It is read off the waterfall below, not by ear.'
+    : '';
+}
 
 function payload() {
-  const data = new FormData(form);
   const out = {};
-  for (const [key, value] of data.entries()) {
-    if (value === '' ) continue;
-    out[key] = value;
+  for (const [key, value] of new FormData(form).entries()) {
+    if (value !== '') out[key] = value;
   }
-  // Checkboxes that mean "turn the default off".
   if (out.evolve_off) { delete out.evolve_off; out.evolve = false; }
-  if (out.doppler_off) { delete out.doppler_off; out.doppler_track = false; }
   if (out.qrm_direct) { delete out.qrm_direct; out.qrm_scatter = false; }
-  if (out.snow_wet) out.snow_wet = true;
-  if (out.no_noise) out.no_noise = true;
+  if (out.doppler_off) { delete out.doppler_off; out.doppler_track = false; }
   return out;
 }
 
 const colour = (v) => {
-  // deep blue -> teal -> amber -> white, so a spread band reads as brightness.
   const stops = [[8,12,24],[18,70,110],[32,150,160],[220,190,90],[255,255,235]];
   const x = Math.max(0, Math.min(0.999, v)) * (stops.length - 1);
   const i = Math.floor(x), f = x - i;
@@ -250,18 +289,14 @@ const colour = (v) => {
 
 function draw(spec) {
   const context = scope.getContext('2d');
-  if (!spec || !spec.data) {
-    context.fillStyle = '#05080c';
-    context.fillRect(0, 0, scope.width, scope.height);
-    return;
-  }
+  if (!spec || !spec.data) { context.fillStyle = '#05080c';
+    context.fillRect(0, 0, scope.width, scope.height); return; }
   const raw = atob(spec.data);
   scope.width = spec.columns; scope.height = spec.rows;
   const image = context.createImageData(spec.columns, spec.rows);
   for (let x = 0; x < spec.columns; x++) {
     for (let y = 0; y < spec.rows; y++) {
-      const value = raw.charCodeAt(x * spec.rows + y) / 255;
-      const [r, g, b] = colour(value);
+      const [r, g, b] = colour(raw.charCodeAt(x * spec.rows + y) / 255);
       const at = ((spec.rows - 1 - y) * spec.columns + x) * 4;
       image.data[at] = r; image.data[at+1] = g; image.data[at+2] = b; image.data[at+3] = 255;
     }
@@ -269,19 +304,22 @@ function draw(spec) {
   context.putImageData(image, 0, 0);
   document.getElementById('axisLow').textContent = spec.low_hz.toFixed(0) + ' Hz';
   document.getElementById('axisHigh').textContent = spec.high_hz.toFixed(0) + ' Hz';
-  document.getElementById('axisTime').textContent = spec.seconds.toFixed(1) + ' s';
+  document.getElementById('axisTime').textContent =
+    spec.seconds.toFixed(1) + ' s, bins of ' + spec.bin_hz.toFixed(2) + ' Hz';
 }
+
+const asHz = (hz) => hz >= 1 ? hz.toFixed(hz >= 100 ? 0 : 2) + ' Hz'
+                             : (hz * 1000).toFixed(1) + ' mHz';
 
 let busy = false;
 async function send() {
   if (busy) return;
   busy = true;
   for (const button of form.querySelectorAll('button')) button.disabled = true;
-  verdict.innerHTML = '<span class="placeholder">keying&hellip;</span>';
+  verdict.innerHTML = '<span class="placeholder">keying&hellip; a slow one takes a moment</span>';
   try {
     const response = await fetch('api/render', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload()),
     });
     const body = await response.json();
@@ -289,22 +327,21 @@ async function send() {
     report.textContent = body.report;
     const scatter = body.meta.scatter || {};
     const qrss = body.meta.qrss || {};
-    const spread = (hz) => hz >= 1 ? hz.toFixed(hz >= 100 ? 0 : 2) + ' Hz'
-                                   : (hz * 1000).toFixed(1) + ' mHz';
-    let says = '';
+    let says = '<b>' + body.profile + '</b> on ' + body.meta.band + ', ' +
+               body.meta.duration.toFixed(1) + ' s of audio';
     if (scatter.sounds_like) {
-      says = '<b>' + (scatter.cell || scatter.kind) + '</b>, ' + spread(scatter.spread_hz) +
-             ' of Doppler spread &mdash; ' + scatter.sounds_like;
+      says += '<br>' + (scatter.cell ? scatter.cell + ' ' : '') + scatter.kind + ', ' +
+              asHz(scatter.spread_hz) + ' of Doppler spread &mdash; ' + scatter.sounds_like;
       if (scatter.delay_s) says += ', the echo ' + scatter.delay_s.toFixed(2) + ' s late';
-    } else {
-      says = 'S/N ' + (body.meta.measured_snr_db ?? 0).toFixed(1) +
-             ' dB measured, no scatter on this path.';
+      if (scatter.sweep_hz_s) says += ', sliding ' + scatter.sweep_hz_s.toFixed(1) + ' Hz/s';
+    } else if (body.meta.measured_snr_db != null) {
+      says += '<br>S/N ' + body.meta.measured_snr_db.toFixed(1) + ' dB measured, direct path';
     }
     if (qrss.label) {
-      says += '<br><b>' + qrss.label + '</b>: a ' + spread(qrss.bandwidth_hz) +
-              ' bin, ' + qrss.processing_gain_db.toFixed(0) + ' dB of processing gain';
+      says += '<br><b>' + qrss.label + '</b>: a ' + asHz(qrss.bandwidth_hz) + ' bin, ' +
+              qrss.processing_gain_db.toFixed(0) + ' dB of processing gain';
       if (qrss.waterfall_snr_db != null) {
-        says += ', so it reads ' + qrss.waterfall_snr_db.toFixed(0) + ' dB on the waterfall';
+        says += ', reading ' + qrss.waterfall_snr_db.toFixed(0) + ' dB on the waterfall';
       }
       if (qrss.smeared) says += ' &mdash; but the path is wider than the bin, so it smears';
     }
@@ -313,8 +350,7 @@ async function send() {
     audio.src = body.audio;
     audio.play().catch(() => {});
     metaBar.innerHTML = '';
-    const bits = ['seed ' + body.seed, body.profile, body.took_ms + ' ms to render'];
-    for (const bit of bits) {
+    for (const bit of ['seed ' + body.seed, body.took_ms + ' ms to render']) {
       const span = document.createElement('span');
       span.textContent = bit;
       metaBar.append(span);
@@ -325,7 +361,7 @@ async function send() {
       document.getElementById('seed').value = body.seed; };
     const save = document.createElement('a');
     save.href = body.audio; save.textContent = 'download the wav';
-    save.download = 'morsefun-' + body.seed + '.wav';
+    save.download = 'morsefun-' + body.profile + '-' + body.seed + '.wav';
     metaBar.append(pin, save);
   } catch (err) {
     verdict.innerHTML = '<span class="error">' + err.message + '</span>';
@@ -340,9 +376,18 @@ document.getElementById('again').addEventListener('click', () => {
   document.getElementById('seed').value = '';
   send();
 });
-document.getElementById('repeat').addEventListener('click', send);
+document.getElementById('clear').addEventListener('click', () => {
+  for (const field of form.querySelectorAll('input, select')) {
+    if (field.type === 'checkbox') field.checked = false;
+    else if (field.type !== 'hidden') field.value = '';
+  }
+  if (current) choose(current);
+  send();
+});
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); send(); }
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault(); send();
+  }
 });
 boot();
 </script>

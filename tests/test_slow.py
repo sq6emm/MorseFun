@@ -160,6 +160,15 @@ class TestMoon(unittest.TestCase):
         self.assertAlmostEqual(starts[1] - starts[0],
                                out.meta["scatter"]["delay_s"], delta=0.05)
 
+    def test_the_level_is_measured_where_the_echo_actually_is(self):
+        # The echo lands two and a half seconds after it was keyed, so measuring
+        # the key-down power against the transmitted envelope would measure the
+        # gaps and scale the noise against nothing at all.
+        out = render("cq de sq6emm k", Config(scatter="eme", band="144M",
+                                              snr_db=10.0, crash_rate=0.0,
+                                              qrm_count=0, seed=6))
+        self.assertAlmostEqual(out.meta["measured_snr_db"], 10.0, delta=2.5)
+
     def test_libration_spreads_it_in_proportion_to_the_band(self):
         def spread(band):
             spec = draw_moon(self.rng(), band, libration_deg_day=2.5)

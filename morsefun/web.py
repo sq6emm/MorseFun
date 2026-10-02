@@ -36,8 +36,10 @@ import numpy as np
 from .cell import CHARACTER_VALUES, parse_character
 from .cli import OVERRIDES, describe
 from .morse import Timing, duration, parse, timeline
-from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, PROFILES
-from .render import MODES, Config, apply_qrss, render
+from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, GROUPS, PROFILES
+from .propagation import parse_band
+from .render import (MODES, QRSS_DIT_S, Config, apply_qrss, mode_name,
+                     qrss_label, render)
 from .wav import wav_bytes
 
 PAGE = Path(__file__).with_name("page.html")
@@ -51,7 +53,7 @@ _AUDIO = re.compile(r"/audio/([A-Za-z0-9_-]{1,64})\.wav$")
 #: is slow on purpose, so the ceiling is minutes rather than seconds -- a
 #: three-second dit spends about half a minute on a single word.
 MAX_CHARACTERS = 300
-MAX_SECONDS = 1200.0
+MAX_SECONDS = 2400.0
 KEEP_RENDERS = 12
 
 #: A QRSS render is minutes of audio, so the store is bounded by weight too.
@@ -83,9 +85,7 @@ def config_from_payload(payload: dict) -> tuple[Config, str]:
     profile = str(payload.get("profile") or DEFAULT_PROFILE)
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}")
-    cfg = Config()
-    for field, value in PROFILES[profile].items():
-        setattr(cfg, field, value)
+    cfg = profile_config(profile)
     for key, value in payload.items():
         field = OVERRIDES.get(key)
         if field is None or field == "seed":
@@ -176,11 +176,49 @@ class Renders:
         return found[0] if found else None
 
 
+def profile_config(name: str) -> Config:
+    """The config a profile amounts to, with nothing else on top of it."""
+    cfg = Config()
+    for field, value in PROFILES[name].items():
+        setattr(cfg, field, value)
+    return cfg
+
+
+def profile_card(name: str) -> dict:
+    """One profile as the page shows it: what band, what path, how fast.
+
+    ``defaults`` is every control's effective value under this profile, so the
+    page can put them in as placeholders and send nothing.  That matters: a form
+    that always sends its own ``wpm`` would key a QRSS profile at 23 words a
+    minute, which is how the whole point of it gets lost.
+    """
+    cfg = profile_config(name)
+    dit = 1.2 / max(cfg.wpm, 1e-6)
+    # A profile that names no band is about band conditions, not about a path.
+    pinned_band = "band" in PROFILES[name]
+    defaults: dict[str, object] = {}
+    for key, field in OVERRIDES.items():
+        value = getattr(cfg, field, None)
+        if value is not None and not isinstance(value, (tuple, list)):
+            defaults[key] = value
+    if dit >= QRSS_DIT_S:
+        defaults["qrss"] = round(dit, 3)
+    return {
+        "name": name,
+        "about": DESCRIPTIONS.get(name, ""),
+        "band": parse_band(cfg.band).label if pinned_band else "any band",
+        "mode": mode_name(cfg.scatter).replace("none", "direct"),
+        "speed": qrss_label(dit) if dit >= QRSS_DIT_S else f"{cfg.wpm:g} wpm",
+        "defaults": defaults,
+    }
+
+
 def options() -> dict:
     """Everything the page needs to build its controls."""
     return {
-        "profiles": [{"name": name, "about": DESCRIPTIONS.get(name, "")}
-                     for name in sorted(PROFILES)],
+        "groups": [{"name": group, "about": detail["about"],
+                    "profiles": [profile_card(name) for name in detail["profiles"]]}
+                   for group, detail in GROUPS.items()],
         "default_profile": DEFAULT_PROFILE,
         "characters": ["auto", *CHARACTER_VALUES],
         "scatter": [name for name in MODES],

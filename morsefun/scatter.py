@@ -437,3 +437,33 @@ def coherent_channel(
     if power <= 1e-30:
         return np.zeros(n, dtype=np.complex128)
     return out / np.sqrt(power)
+
+
+def swept_channel(
+    n: int, sample_rate: int, times: np.ndarray, doppler: np.ndarray,
+    level: np.ndarray, spread: np.ndarray, rng: np.random.Generator,
+) -> np.ndarray:
+    """One moving reflector: a tone that slides, with a little roughness on it.
+
+    ``times`` is a coarse grid with the Doppler, the strength and the width of
+    the return on it; everything is interpolated up to the sample rate, which is
+    all an aeroplane needs -- it is one scatterer, not a population, and nothing
+    about it changes in milliseconds.  Normalised to unit mean power, so a pass
+    that is only loud for half a minute is quiet for the rest of it.
+    """
+    if n <= 0 or times.size < 2:
+        return np.zeros(max(n, 0), dtype=np.complex128)
+    t = np.arange(n) / sample_rate
+    width = np.interp(t, times, spread)
+    rate = float(np.clip(np.mean(spread), 0.05, 20.0))
+    ticks = max(int(times[-1] * max(rate * 4.0, 1.0)) + 2, 8)
+    coarse = np.linspace(0.0, float(times[-1]), ticks)
+    wander = np.clip(smooth_noise(ticks, ticks / max(coarse[-1], 1e-9), rate, rng),
+                     -3.0, 3.0)
+    freq = np.interp(t, times, doppler) + width * np.interp(t, coarse, wander)
+    phase = 2 * np.pi * np.cumsum(freq) / sample_rate + rng.uniform(0, 2 * np.pi)
+    out = np.interp(t, times, level) * np.exp(1j * phase)
+    power = float(np.mean(np.abs(out) ** 2))
+    if power <= 1e-30:
+        return np.zeros(n, dtype=np.complex128)
+    return out / np.sqrt(power)

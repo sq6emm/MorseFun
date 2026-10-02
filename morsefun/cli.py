@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .cell import parse_character
 from .play import PlaybackError, describe_players, find_player, play
-from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, PROFILES
+from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, GROUPS, PROFILES
 from .render import Config, Render, apply_qrss, render
 from .wav import write_wav
 
@@ -75,6 +75,11 @@ OVERRIDES = {
     "moon_law": "moon_scatter_law",
     "faraday": "faraday_db",
     "doppler_track": "doppler_track",
+    "baseline_km": "baseline_km",
+    "altitude": "altitude_km",
+    "plane_speed": "plane_speed_mps",
+    "plane_heading": "plane_heading_deg",
+    "plane_length": "plane_length_m",
     "iono_modes": "iono_modes",
     "layer_rate": "layer_rate_mps",
     "layer_churn": "layer_turbulence_mps",
@@ -146,9 +151,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="operating frequency: 10G, 10.368GHz, 1296, 144M, 3cm (default: 10G)")
     w.add_argument("--scatter",
                    choices=("none", "rain", "snow", "aurora", "iono", "skywave",
-                            "moon", "eme"),
+                            "moon", "eme", "aircraft", "air", "plane"),
                    help="what the signal bounces off: weather, an auroral curtain, "
-                        "a low-band skywave hop (iono) or the Moon (eme)")
+                        "a low-band skywave hop (iono), an airliner (air), or "
+                        "the Moon (eme)")
     w.add_argument("--rain-rate", type=float, metavar="MM_H", help="rain rate (default: 12)")
     w.add_argument("--snow-rate", type=float, metavar="MM_H",
                    help="snowfall, water equivalent (default: 4)")
@@ -219,6 +225,17 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--echo-test", action="store_true",
                    help="EME: hear your own keying as well, so the echo answers it "
                         "2.5 s later (the same as --rician 6)")
+    w.add_argument("--baseline-km", type=float, metavar="KM",
+                   help="aircraft scatter: how far apart the two stations are")
+    w.add_argument("--altitude", type=float, metavar="KM",
+                   help="aircraft scatter: how high it is flying (default: drawn 7-12.5)")
+    w.add_argument("--plane-speed", type=float, metavar="MPS",
+                   help="aircraft scatter: how fast (default: drawn 180-290)")
+    w.add_argument("--plane-heading", type=float, metavar="DEG",
+                   help="aircraft scatter: 90 crosses the path, 0 follows it")
+    w.add_argument("--plane-length", type=float, metavar="M",
+                   help="aircraft scatter: how long the reflector is, which sets "
+                        "the roughness on the note")
     w.add_argument("--iono-modes", type=int, metavar="N",
                    help="low band: hops or magneto-ionic components arriving, 1 to 3")
     w.add_argument("--layer-rate", type=float, metavar="MPS",
@@ -424,6 +441,21 @@ def describe_scatter(meta: dict, scatter: dict) -> list[str]:
                   f"at {c['level_db']:+.0f} dB" for c in cores]
         lines.extend(wrap(f"            {len(cores)} cores  ", detail))
 
+    if scatter["kind"] == "aircraft":
+        lines.extend(wrap("            ", [
+            f"{scatter['speed_mps']:.0f} m/s at {scatter['altitude_km']:.1f} km, "
+            f"heading {scatter['heading_deg']:.0f}° across a "
+            f"{scatter['baseline_km']:.0f} km path",
+            f"sliding {hz(scatter['sweep_hz_s'], signed=True)} a second, "
+            f"{hz(scatter['doppler_from_hz'], signed=True)} to "
+            f"{hz(scatter['doppler_to_hz'], signed=True)}",
+            f"{scatter['length_m']:.0f} m of aeroplane, so "
+            f"{hz(scatter['spread_hz'])} of roughness on the note",
+            f"loudest {scatter['best_at_s']:.0f} s in, usable for "
+            f"{scatter['window_s']:.0f} s",
+        ]))
+        return lines + _budget(scatter)
+
     if scatter["kind"] == "moon":
         lines.extend(wrap("            ", [
             f"the echo is {scatter['delay_s']:.2f} s late",
@@ -568,9 +600,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list_profiles:
         width = max(len(n) for n in PROFILES)
-        for name in sorted(PROFILES):
-            mark = " (default)" if name == DEFAULT_PROFILE else ""
-            print(f"{name:<{width}}  {DESCRIPTIONS.get(name, '')}{mark}")
+        for group, detail in GROUPS.items():
+            print(f"{group}  \u2014 {detail['about']}")
+            for name in detail["profiles"]:
+                mark = " (default)" if name == DEFAULT_PROFILE else ""
+                print(f"  {name:<{width}}  {DESCRIPTIONS.get(name, '')}{mark}")
+            print()
         return 0
     if args.list_players:
         print(describe_players())

@@ -12,6 +12,7 @@ import numpy as np
 from morsefun import Config, Timing, parse, render, timeline, to_code
 from morsefun.cli import main
 from morsefun.play import describe_players
+from morsefun.profiles import DESCRIPTIONS, GROUPS, PROFILES
 from morsefun.dsp import rms
 from morsefun.morse import duration
 from morsefun.wav import read_wav
@@ -215,6 +216,20 @@ class TestCli(unittest.TestCase):
 
     def test_profiles_listing(self):
         self.assertEqual(main(["--list-profiles"]), 0)
+
+
+class TestProfiles(unittest.TestCase):
+    def test_every_profile_is_described_grouped_and_renders(self):
+        listed = [name for group in GROUPS.values() for name in group["profiles"]]
+        self.assertEqual(sorted(listed), sorted(PROFILES))
+        for name in PROFILES:
+            self.assertTrue(DESCRIPTIONS.get(name), f"{name} has no description")
+            cfg = Config(seed=3)
+            for field, value in PROFILES[name].items():
+                setattr(cfg, field, value)
+            out = render("e", cfg)          # one dit: enough to prove it works
+            self.assertTrue(np.isfinite(out.samples).all(), name)
+            self.assertGreater(out.samples.size, 0, name)
 
 
 if __name__ == "__main__":

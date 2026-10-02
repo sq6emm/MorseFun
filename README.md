@@ -46,13 +46,26 @@ input, so anything that reads a WAV from a pipe will do. Ctrl-C stops playback.
 docker compose up -d --build        # then open http://<host>:8086
 ```
 
-The same renderer behind a small standard-library HTTP server: type a message,
-press **send it**, and the page plays what came back and draws the spectrogram of
-it, so the Doppler spread of the cell can be seen as well as heard. **Another
-front** re-rolls the weather with the same settings, which is the quickest way to
-hear how little two rain scatter signals have in common; every render reports its
-seed, and pinning the seed brings that front back. Every control can be left
-blank, which means *drawn*.
+The same renderer behind a small standard-library HTTP server, laid out the way
+the questions come: **pick a band** — LF/MF, HF, VHF/UHF, microwave, or none in
+particular — and then **pick what the signal did to get there**, from the modes
+that band actually offers. Each one says what it is in a line, and choosing it
+renders straight away.
+
+Then type a message, press **send it**, and the page plays what came back and
+draws the waterfall of it, with the transform length following the keying: a few
+hundred Hz across for 23 wpm, a few Hz across and tenths of a Hz per bin for
+QRSS, which is the only way a three-second dit is visible at all. **Another one
+like it** re-draws the path with the same settings — a different cell, moonrise
+or aeroplane — which is the quickest way to hear how little two signals on the
+same mode have in common; every render reports its seed, and pinning the seed
+brings that one back.
+
+Every control can be left blank, and blank means *whatever the profile says*,
+with the profile's own value shown in the box. That matters more than it sounds:
+a form that insists on its own 23 wpm would key a QRSS profile at 23 wpm, and a
+transmission that should run for six minutes comes out as thirteen seconds of
+something else.
 
 `MORSEFUN_PORT` publishes it somewhere other than 8086. There is nothing to
 install beyond NumPy and nothing is written to disk — the last two dozen renders
@@ -387,6 +400,56 @@ middle. That smears fast CW and is neither here nor there at QRSS speeds.
   audio     354.7 s, 8000 Hz, 5543 KB, seed 12
 ```
 
+## Aircraft scatter: a note that slides
+
+```bash
+python -m morsefun "cq cq cq de sq6emm k" --profile air-scatter
+python -m morsefun "cq de sq6emm k" --scatter air --band 1296 --plane-heading 90
+```
+
+Nothing else on the microwave bands sounds like this. A rain cell is a population
+of scatterers and comes back as a hiss; an airliner is one lump of metal 60 m
+long doing 250 m/s, so it comes back as a **tone that slides**. The Doppler is
+bistatic as always, but the velocity is now a single vector and the two unit
+vectors swing round as the aeroplane crosses between the stations: it arrives
+high, slides down through zero as it passes the middle of the path, and goes out
+the other side, while the strength rises and falls with `1/(R_a R_b)^2` and with
+how far off each antenna's beam it is.
+
+At 10 GHz that slide is hundreds of Hz over a minute or two, and part of it
+slides out of the filter, which the report charges for. On 2 m the same aeroplane
+moves the note by a few Hz and nobody notices. A plane flying *along* the path
+instead of across it does almost nothing, which is also true.
+
+The aeroplane is not quite a point: it is tens of metres across and its aspect
+turns slowly, so several reflecting parts answer at slightly different Doppler.
+That is a few Hz of roughness at 10 GHz, derived from the limb speed of something
+`L` long turning at the rate the geometry gives it, and it is why the note is not
+perfectly clean. `--baseline-km`, `--altitude`, `--plane-speed`,
+`--plane-heading`, `--plane-length` and `--beamwidth` pin what is otherwise
+drawn; the pass is centred on the message, because nobody keys into an empty sky.
+
+```
+  text      cq cq cq de sq6emm sq6emm k
+  code      -.-. --.-  /  -.-. --.-  /  -.-. --.-  /  -.. .  /  ... --.- -.... . -- --  /  ... --.- -.......
+  keying    18 wpm, dit 66.7 ms, standard spacing
+  tone      600 Hz, drift ±1.00 Hz
+  path      10 GHz, λ 30.0 mm, 67 Hz per m/s
+  scatter   aircraft: Doppler +1054 Hz tuned out, spread 2.12 Hz, 100% inside the filter
+            — a tone sliding through the filter
+            239 m/s at 9.4 km, heading 67° across a 507 km path
+            sliding -12.5 Hz a second, +235 Hz to +0.00 mHz
+            73 m of aeroplane, so 2.12 Hz of roughness on the note
+            loudest 19 s in, usable for 19 s
+  band      air-scatter: S/N 6 dB in 500 Hz, QRN 0.05/s at +22 dB, measured 5.0 dB
+  audio     18.6 s, 44100 Hz, 1602 KB, seed 11
+```
+
+Tropo gets no model of its own: on `--scatter none` with a band and some fading
+it is already what tropo is, a signal that arrives whole and comes and goes. The
+`tropo-2m` and `tropo-10g` profiles are exactly that, with the scintillation rate
+and the rig drift that each band deserves.
+
 ## Truly random
 
 Every render draws from `np.random.SeedSequence(seed).spawn(...)`: one
@@ -431,29 +494,47 @@ python -m morsefun --list-profiles
 ```
 
 ```
-30m-qrss      30 m QRSS3: the knights' band, fuzzy and wandering
-aurora        aurora on 2 m, where it works: hoarse, bursty, shifted down
-clean         bare tone, no band at all
-contest       a crowded band: four stations and a carrier in a 700 Hz filter
-dry-snow      10 GHz off dry snow: narrow, wind-shifted and very weak
-eme           2 m moonbounce at 12 wpm: hollow, fluttery, 2.5 s behind you
-eme-qrss      2 m EME QRSS3: the echo 2.5 s late, libration and Faraday
-heavy-rain    10 GHz off a downpour: 45 mm/h, loud, wide and attenuated
-lf-qrss       2200 m QRSS3: a trace like a hair, under heavy static
-light-rain    10 GHz off layered rain on a long path: almost clean CW
-mf-qrss       630 m QRSS3: still razor thin, a little more layer motion
-noisy         weak signal, deep QSB, crashes and two other stations
-quiet         good conditions, strong signal, the odd crash
-rain-scatter  10 GHz off a rain cell: a different front every time
-storm-front   10 GHz into a storm: four cores, lift, shear, aurora-like
-thunderstorm  heavy static, crashes several times a second
-typical       S/N 10 dB, slow fading, one neighbour in the pass band (default)
-wet-snow      10 GHz off the melting layer: the bright band, much stronger
-worn-rig      clean band, drifting VFO and mains hum on the carrier
+LF / MF  — 2200 m and 630 m: a stable path under a floor of lightning, so the trick is to be narrow rather than loud
+  lf-qrss       2200 m QRSS3: a trace like a hair, under heavy static
+  mf-qrss       630 m QRSS3: still razor thin, a little more layer motion
+  lf-cw         2200 m at 8 wpm: readable by ear, buried in lightning
+
+HF  — the ionosphere arriving by more than one path at once, which is where fading comes from
+  40m-dx        40 m at night: three hops beating against each other
+  30m-qrss      30 m QRSS3: the knights' band, fuzzy and wandering
+
+VHF / UHF  — line of sight, and the three ways past it: tropo, an auroral curtain, and the Moon
+  tropo-2m      2 m tropo: steady, with a slow fade on it
+  aurora        aurora on 2 m, where it works: hoarse, bursty, shifted down
+  eme           2 m moonbounce at 12 wpm: hollow, fluttery, 2.5 s behind you
+  eme-qrss      2 m EME QRSS3: the echo 2.5 s late, libration and Faraday
+
+Microwave  — 10 GHz, where the weather is the propagation: rain, snow, aeroplanes and the Moon
+  tropo-10g     10 GHz tropo: scintillating, and the rig wanders
+  rain-scatter  10 GHz off a rain cell: a different front every time
+  light-rain    10 GHz off layered rain on a long path: almost clean CW
+  heavy-rain    10 GHz off a downpour: 45 mm/h, loud, wide and attenuated
+  storm-front   10 GHz into a storm: four cores, lift, shear, aurora-like
+  dry-snow      10 GHz off dry snow: narrow, wind-shifted and very weak
+  wet-snow      10 GHz off the melting layer: the bright band, much stronger
+  air-scatter   10 GHz off an airliner: a note that slides and is gone
+  eme-10g       10 GHz moonbounce: 30 kHz of Doppler tracked out
+
+Any band  — band conditions on their own, with no propagation model behind them
+  typical       S/N 10 dB, slow fading, one neighbour in the pass band (default)
+  quiet         good conditions, strong signal, the odd crash
+  noisy         weak signal, deep QSB, crashes and two other stations
+  contest       a crowded band: four stations and a carrier in a 700 Hz filter
+  thunderstorm  heavy static, crashes several times a second
+  worn-rig      clean band, drifting VFO and mains hum on the carrier
+  clean         bare tone, no band at all
 ```
 
-A profile only sets defaults; anything on the command line still wins, so
-`--profile noisy --snr 12` is a bad band with a strong signal in it.
+Profiles are grouped by band, because that is the order the questions come in:
+where are you, and then what did the signal do to get here. A profile only sets
+defaults; anything on the command line still wins, so `--profile noisy --snr 12`
+is a bad band with a strong signal in it, and `--profile lf-qrss --qrss 60` is
+2200 m with a minute to each dit.
 
 ## Many files at once
 
@@ -643,6 +724,12 @@ amateurs actually work rather than any surveyed population; the verdicts in
 `sounds_like`; and the QRN, QRM and heterodyne models, which are there to make
 the band sound busy and are not models of anything in particular.
 
+The aeroplane is a model too: the speeds, altitudes and lengths are the ranges an
+airliner falls in, the antenna is a Gaussian beam pointed along the path rather
+than a measured pattern, the radar cross section never enters (the level is
+normalised and `--snr` sets it), and the pass is centred on the message instead of
+being drawn in time.
+
 The same goes for the slow modes. The libration rates are drawn from 0.2 to
 8 degrees a day because that is the range operators talk about, not from an
 ephemeris. The Faraday depth is a rule, 22 dB at 144 MHz falling as `1/f^2`, not
@@ -663,6 +750,7 @@ morsefun/propagation.py  bands, drop and flake distributions, Doppler, ITU-R att
 morsefun/cell.py      the cell: cores, bistatic geometry, and how it all evolves
 morsefun/skywave.py   a low band: coherent hops off a layer that moves
 morsefun/moon.py      EME: libration, the 2.5 second delay, Doppler, Faraday
+morsefun/aircraft.py  aircraft scatter: one reflector, moving, sliding
 morsefun/scatter.py   the Rayleigh scatter channel, fixed or changing as you listen
 morsefun/dsp.py       FFT bandpass, slow random modulation, soft limiter
 morsefun/render.py    the whole chain, levels and the S/N scaling
@@ -676,4 +764,6 @@ tests/                timing, S/N accuracy, filtering, determinism, playback, CL
                       propagation: Doppler, ITU attenuation, Rayleigh statistics
                       cell: bistatic geometry, the draw, the evolving channel
                       slow: QRSS bins and gain, skywave modes, the lunar echo
+                      aircraft: the slide, the pass, the swept channel
+                      web: what the page is told, and what it sends back
 ```

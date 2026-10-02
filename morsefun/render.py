@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 
 import numpy as np
 
+from .aircraft import aircraft_track, draw_aircraft
 from .cell import (Cell, cell_doppler, draw_cell, evolution, parse_character,
                    sounds_like)
 from .dsp import bandpass, db_to_amp, fast_length, rms, soft_limit
@@ -30,7 +31,7 @@ from .propagation import (REFERENCE_RATE_MM_H, AuroraSpec, Band, aurora_doppler,
 from .scatter import (Component, EvolvingSpectrum, ScatterSpec, activity_gate,
                       apply_channel, audible_fraction, block_size, channel,
                       coherent_channel, doppler_spectrum, evolving_channel,
-                      frame_count, rician_weights, scintillate)
+                      frame_count, rician_weights, scintillate, swept_channel)
 from .skywave import draw_iono, iono_carriers
 from .synth import ToneSpec, keyed_tone
 
@@ -43,9 +44,10 @@ WEATHER_MODES = ("rain", "snow")
 
 #: What people call these paths, and what this module calls them.
 MODE_ALIASES = {"eme": "moon", "lunar": "moon", "skywave": "iono",
-                "ionosphere": "iono", "iono": "iono", "moon": "moon"}
+                "ionosphere": "iono", "iono": "iono", "moon": "moon",
+                "air": "aircraft", "plane": "aircraft", "aircraft": "aircraft"}
 
-MODES = ("none", "rain", "snow", "aurora", "iono", "moon")
+MODES = ("none", "rain", "snow", "aurora", "iono", "moon", "aircraft")
 
 #: Below three words a minute nobody is listening by ear any more: the message
 #: is read off a waterfall, in a bin about 1/dit wide.  That is QRSS.
@@ -156,6 +158,12 @@ class Config:
     moon_scatter_law: float | None = None     # cos^n across the disc
     faraday_db: float | None = None           # VHF polarisation fading
     doppler_track: bool = True                # follow the Doppler, as rigs do
+    # aircraft scatter: one lump of metal, moving fast
+    baseline_km: float | None = None          # how far apart the stations are
+    altitude_km: float | None = None          # how high it is flying
+    plane_speed_mps: float | None = None
+    plane_heading_deg: float | None = None    # 90 is straight across the path
+    plane_length_m: float | None = None
     # a low band: the skywave path, seen through a milliHertz filter
     iono_modes: int | None = None             # hops or magneto-ionic components
     layer_rate_mps: float | None = None       # how fast the layer is moving
@@ -442,6 +450,43 @@ def _moon_path(cfg: Config, env: np.ndarray, band: Band, spec,
     return apply_channel(late, cfg.freq, cfg.sample_rate, process), info
 
 
+def _aircraft_path(cfg: Config, env: np.ndarray, band: Band,
+                   rngs: dict[str, np.random.Generator]):
+    """Aircraft scatter: a tone that slides in and out over a minute or two."""
+    spec = draw_aircraft(
+        rngs["weather"], baseline_km=cfg.baseline_km, altitude_km=cfg.altitude_km,
+        speed_mps=cfg.plane_speed_mps, heading_deg=cfg.plane_heading_deg,
+        length_m=cfg.plane_length_m, beamwidth_deg=cfg.beamwidth_deg)
+    seconds = env.size / cfg.sample_rate
+    times, doppler, level, spread, info = aircraft_track(spec, band, seconds)
+
+    info["tuned_out_hz"] = 0.0
+    if cfg.retune:
+        # You tune to it when it is loudest, and then listen to it slide away.
+        info["tuned_out_hz"] = float(info["shift_hz"])
+        doppler = doppler - float(info["shift_hz"])
+        info["doppler_from_hz"] -= float(info["tuned_out_hz"])
+        info["doppler_to_hz"] -= float(info["tuned_out_hz"])
+        info["shift_hz"] = 0.0
+    inside = np.abs(doppler) <= cfg.bandwidth / 2.0
+    weight = level**2
+    info["audible_fraction"] = float(
+        np.sum(weight[inside]) / max(float(np.sum(weight)), 1e-12))
+    info["sounds_like"] = (
+        "a tone sliding through the filter" if abs(info["sweep_hz_s"]) > 1.0
+        else "a clean note, barely moving")
+
+    process = swept_channel(env.size, cfg.sample_rate, times, doppler, level,
+                            spread, rngs["scatter"])
+    depth = 0.0 if cfg.scintillation_db is None else float(cfg.scintillation_db)
+    info["scintillation_db"] = depth
+    if depth > 0:
+        process = process * scintillate(
+            env.size, cfg.sample_rate, rngs["scatter"], depth,
+            float(cfg.scintillation_rate or 0.3))
+    return apply_channel(env, cfg.freq, cfg.sample_rate, process), info
+
+
 def _station_scatter(cfg: Config, band: Band, cell: Cell, mode: str):
     """Scatter the other stations too -- same front, their own path into it.
 
@@ -516,6 +561,8 @@ def render(text: str, config: Config | None = None) -> Render:
             scattered, scatter_info = _iono_path(cfg, env, band, rngs)
         elif mode == "moon":
             scattered, scatter_info = _moon_path(cfg, env, band, moon, rngs)
+        elif mode == "aircraft":
+            scattered, scatter_info = _aircraft_path(cfg, env, band, rngs)
         else:
             scattered, scatter_info = _aurora_path(cfg, env, band, rngs)
         direct_amp, scatter_amp = rician_weights(cfg.rician_db)
@@ -530,8 +577,22 @@ def render(text: str, config: Config | None = None) -> Render:
     if noisy:
         signal = bandpass(signal, cfg.sample_rate, cfg.freq, cfg.bandwidth)
 
-    key_down = env > 0.5
-    key_up = env < 0.02
+    # Where the signal actually is.  Off the Moon it is not where it was keyed:
+    # the echo lands two and a half seconds later, so measuring the key-down
+    # power against the transmitted envelope would measure the gaps instead, and
+    # scale the noise against nothing.  On an echo test both are present.
+    received = env
+    delay = int(round(float(scatter_info.get("delay_s", 0.0)) * cfg.sample_rate))
+    if delay and delay < env.size:
+        late = np.zeros_like(env)
+        late[delay:] = env[:env.size - delay]
+        direct_amp, scatter_amp = rician_weights(cfg.rician_db)
+        received = np.maximum(direct_amp * env, scatter_amp * late)
+        peak = float(received.max())
+        received = received / peak if peak > 1e-12 else env
+
+    key_down = received > 0.5
+    key_up = received < 0.02
     down_power = float(np.mean(np.square(signal[key_down]))) if key_down.any() else 0.0
 
     # What the signal is worth: reflectivity sets how strong the return is
