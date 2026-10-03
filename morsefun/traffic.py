@@ -1077,7 +1077,7 @@ def beacon(rng: np.random.Generator, band: str = "vhf", qrss: bool = False,
         before = 0.0
         wpm = float(rng.uniform(12.0, 16.0))
     else:
-        head = str(rng.choice([f"{call} {loc6}", f"{call} {call} {loc6} {loc6}",
+        head = str(rng.choice([f"{call} {loc6}", f"{call} {call} {loc6}",
                                f"vvv de {call} {loc6}", f"vvv vvv de {call} {call} {loc6}",
                                f"{call} {loc6}", f"de {call} {loc6}", f"{call} {loc4}"]))
         want = rng.random() < 0.85 if carrier is None else bool(carrier)
