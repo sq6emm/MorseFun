@@ -7,13 +7,13 @@ import json
 import re
 import secrets
 import sys
-from dataclasses import replace
+import time
 from pathlib import Path
 
 from .cell import parse_character
 from .play import PlaybackError, describe_players, find_player, play
-from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, GROUPS, PROFILES
-from .render import Config, Render, apply_qrss, render
+from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, GROUPS, PROFILES, resolve
+from .render import Config, Render, apply_qrss, render, streams
 from .wav import write_wav
 
 DEFAULT_TEXT = "cq cq de sq6emm sq6emm k"
@@ -37,6 +37,8 @@ OVERRIDES = {
     "qrn_db": "crash_db",
     "qrm": "qrm_count",
     "qrm_db": "qrm_db",
+    "qrm_wpm": "qrm_wpm",
+    "qrm_style": "qrm_style",
     "birdies": "birdie_count",
     "birdie_db": "birdie_db",
     "band": "band",
@@ -157,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "the Moon (eme)")
     w.add_argument("--rain-rate", type=float, metavar="MM_H", help="rain rate (default: 12)")
     w.add_argument("--snow-rate", type=float, metavar="MM_H",
-                   help="snowfall, water equivalent (default: 4)")
+                   help="snowfall, melted (default: drawn, around a millimetre an hour)")
     w.add_argument("--snow-wet", action="store_true", default=None,
                    help="melting snow: the radar bright band, far stronger than dry")
     w.add_argument("--cell", type=parse_character, metavar="KIND",
@@ -275,6 +277,11 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--qrm", type=int, metavar="N", help="other CW stations in the pass band")
     b.add_argument("--qrm-db", type=float, nargs=2, metavar=("MIN", "MAX"),
                    help="their level above the floor, dB")
+    b.add_argument("--qrm-wpm", type=float, nargs=2, metavar=("MIN", "MAX"),
+                   help="how fast they send (default: 14 to 32)")
+    b.add_argument("--qrm-style", choices=("ragchew", "contest", "mixed"),
+                   help="what they are sending: chat, contest exchanges with serials "
+                        "and a pile-up on your frequency, or some of each")
     b.add_argument("--birdies", type=int, metavar="N", help="drifting carriers")
     b.add_argument("--birdie-db", type=float, metavar="DB", help="carrier level above the floor")
 
@@ -282,23 +289,27 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--rate", type=int, help="sample rate in Hz (default: 44100)")
     o.add_argument("--pad", type=float, metavar="S", help="silence before and after (default: 0.6)")
     o.add_argument("--peak", type=float, help="peak level, 0..1 (default: 0.89)")
-    o.add_argument("--no-limit", action="store_true", help="skip the AGC-style soft limiter")
-    o.add_argument("--seed", type=int, help="reuse a seed to get the same band back")
+    o.add_argument("--no-limit", action="store_true", help="switch the receiver's AGC off")
+    o.add_argument("--seed", type=int,
+                   help="reuse a seed to get the same band back; batches and repeats "
+                        "count on from it")
 
     a = p.add_argument_group("playback")
     a.add_argument("-p", "--play", action="store_true",
                    help="play it (the default when no file is being written)")
     a.add_argument("--player", metavar="CMD",
                    help='player command, ending in the stdin argument, e.g. "ffplay -nodisp -autoexit -"')
-    a.add_argument("--repeat", type=int, default=1, metavar="N", help="play it N times")
+    a.add_argument("--repeat", type=int, default=1, metavar="N",
+                   help="key it N times over, each on a freshly drawn band")
     a.add_argument("--gap", type=float, default=1.5, metavar="S",
                    help="silence between repeats in seconds (default: 1.5)")
     return p
 
 
-def config_from_args(args: argparse.Namespace) -> Config:
+def config_from_args(args: argparse.Namespace, seed: int) -> Config:
+    """The profile, drawn for this ``seed``, with the command line on top."""
     cfg = Config()
-    for field, value in PROFILES[args.profile].items():
+    for field, value in resolve(args.profile, streams(seed)["profile"]).items():
         setattr(cfg, field, value)
     for option, field in OVERRIDES.items():
         value = getattr(args, option, None)
@@ -313,9 +324,20 @@ def config_from_args(args: argparse.Namespace) -> Config:
         cfg.snr_db = None
     if args.no_limit:
         cfg.limit = False
-    if cfg.seed is None:
-        cfg.seed = secrets.randbelow(2**31)  # reported, so any run can be repeated
+    cfg.seed = int(seed)       # reported, so any run can be repeated
     return cfg
+
+
+def one_liner(result: Render) -> str:
+    """The verdict in a few words, for a pass that is one of several."""
+    m = result.meta
+    scatter = m.get("scatter") or {}
+    if scatter.get("sounds_like"):
+        head = " ".join(str(scatter.get(k, "")) for k in ("cell", "kind")).strip()
+        return f"{head}, spread {hz(scatter['spread_hz'])}: {scatter['sounds_like']}"
+    if m.get("measured_snr_db") is not None:
+        return f"S/N measured {m['measured_snr_db']:.1f} dB"
+    return "no band"
 
 
 def slug(text: str, limit: int = 48) -> str:
@@ -479,11 +501,20 @@ def describe_scatter(meta: dict, scatter: dict) -> list[str]:
         detail = [
             f"layer {'rising' if rise >= 0 else 'falling'} {abs(rise):.2f} m/s at "
             f"{scatter['elevation_deg']:.0f}\u00b0 take-off",
-            f"wandering {hz(scatter['wander_hz'])}",
         ]
-        if len(scatter.get("modes", [])) > 1:
-            detail.append(f"modes {hz(scatter['between_hz'])} apart, so it fades every "
-                          f"{minutes(scatter['fade_period_s'])}")
+        if scatter.get("diffuse"):
+            detail.append(f"each mode a Rayleigh flutter {hz(scatter['wander_hz'])} wide")
+            if len(scatter.get("modes", [])) > 1:
+                detail.append(f"modes {hz(scatter['between_hz'])} apart")
+            fades = scatter.get("fades_per_s", 0.0)
+            if fades > 0:
+                detail.append(f"so it fades about every {1.0 / fades:.1f} s"
+                              if fades < 1.0 else f"so it fades {fades:.1f} times a second")
+        else:
+            detail.append(f"wandering {hz(scatter['wander_hz'])}")
+            if len(scatter.get("modes", [])) > 1:
+                detail.append(f"modes {hz(scatter['between_hz'])} apart, so it fades "
+                              f"every {minutes(scatter['fade_period_s'])}")
         lines.extend(wrap("            ", detail))
         return lines + _budget(scatter)
 
@@ -628,45 +659,55 @@ def main(argv: list[str] | None = None) -> int:
             print(f"morsefun: {err}", file=sys.stderr)
             return 2
 
-    cfg = config_from_args(args)
+    base = args.seed if args.seed is not None else secrets.randbelow(2**31)
+    passes = max(args.repeat, 1) if playing else 1
     outdir = Path(args.outdir)
     rendered: list[tuple[Render, Path | None]] = []
 
     for index, text in enumerate(texts):
-        seed = cfg.seed if len(texts) == 1 else cfg.seed + index
-        result = render(text, replace(cfg, seed=seed))
-        if not result.meta["characters"]:
-            print(f"nothing to key in {text!r}", file=sys.stderr)
-            continue
+        for turn in range(passes):
+            # Every message, and every pass over one, is its own draw: seeds count
+            # on from the first so the whole run comes back with --seed.
+            cfg = config_from_args(args, base + index * passes + turn)
+            result = render(text, cfg)
+            if not result.meta["characters"]:
+                if turn == 0:
+                    print(f"nothing to key in {text!r}", file=sys.stderr)
+                break
 
-        path = None
-        if writing:
-            if args.batch:
-                path = outdir / f"{index + 1:03d}-{slug(text)}.wav"
-            elif args.out:
-                path = Path(args.out)
-            else:
-                path = outdir / f"{slug(text)}.wav"
-            write_wav(path, result.samples, result.sample_rate)
-        rendered.append((result, path))
+            path = None
+            if writing and turn == 0:
+                if args.batch:
+                    path = outdir / f"{index + 1:03d}-{slug(text)}.wav"
+                elif args.out:
+                    path = Path(args.out)
+                else:
+                    path = outdir / f"{slug(text)}.wav"
+                write_wav(path, result.samples, result.sample_rate)
+            rendered.append((result, path))
 
-        if not args.json and not args.quiet:
-            heading = str(path) if path else f"playing through {player.name}"
-            if path and playing:
-                heading += f"  (and playing through {player.name})"
-            if playing and args.repeat > 1:
-                heading += f", {args.repeat}\u00d7 {args.gap:.1f} s apart"
-            print(describe(result, heading, args.profile), flush=True)
+            if not args.json and not args.quiet:
+                if turn == 0:
+                    heading = str(path) if path else f"playing through {player.name}"
+                    if path and playing:
+                        heading += f"  (and playing through {player.name})"
+                    if playing and passes > 1:
+                        heading += f", {passes}\u00d7 {args.gap:.1f} s apart, a new band each time"
+                    print(describe(result, heading, args.profile), flush=True)
+                else:
+                    print(f"  again     seed {cfg.seed}: {one_liner(result)}", flush=True)
 
-        if playing:
-            try:
-                play(result.samples, result.sample_rate, args.player, args.repeat, args.gap)
-            except PlaybackError as err:
-                print(f"morsefun: {err}", file=sys.stderr)
-                return 2
-            except KeyboardInterrupt:
-                print("\nstopped.", file=sys.stderr)
-                return 130
+            if playing:
+                try:
+                    if turn:
+                        time.sleep(max(0.0, args.gap))
+                    play(result.samples, result.sample_rate, args.player)
+                except PlaybackError as err:
+                    print(f"morsefun: {err}", file=sys.stderr)
+                    return 2
+                except KeyboardInterrupt:
+                    print("\nstopped.", file=sys.stderr)
+                    return 130
 
     if not rendered:
         return 1

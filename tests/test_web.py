@@ -43,6 +43,18 @@ class TestOptions(unittest.TestCase):
         self.assertEqual(profile_card("typical")["band"], "any band")
         self.assertEqual(profile_card("typical")["mode"], "direct")
         self.assertNotIn("qrss", profile_card("typical")["defaults"])
+        # A knob the profile draws is shown as its range, not as one number.
+        self.assertEqual(profile_card("typical")["defaults"]["snr"], "6\u201314")
+        self.assertEqual(profile_card("contest-40m")["speed"], "26\u201334 wpm")
+        self.assertEqual(profile_card("contest-40m")["defaults"]["qrm_style"], "contest")
+
+    def test_the_same_seed_draws_the_same_evening(self):
+        a, _ = config_from_payload({"profile": "typical", "seed": "77"})
+        b, _ = config_from_payload({"profile": "typical", "seed": "77"})
+        c, _ = config_from_payload({"profile": "typical", "seed": "78"})
+        self.assertEqual(a.snr_db, b.snr_db)
+        self.assertNotEqual(a.snr_db, c.snr_db)
+        self.assertEqual(a.seed, 77)
 
 
 class TestPayload(unittest.TestCase):

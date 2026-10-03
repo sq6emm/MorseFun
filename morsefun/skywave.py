@@ -20,6 +20,17 @@ two on 2200 m.  Irregularities inside the layer spread each ray a little
 further, and a path that arrives by more than one mode or hop arrives at more
 than one Doppler: those beat, and that beat is the slow QSB a QRSS screen
 shows as the trace fading in and out of its own shadow.
+
+HF is a different animal.  The same layer motion is a hundred times more Doppler
+on 40 m than on 2200 m, the reflection is no longer a single specular point but
+a patch of irregularities moving every which way, and the two magneto-ionic
+components and the several hops all arrive at once.  What a receiver sees is not
+a few carriers beating but a *diffuse* channel: each mode a Gaussian-spread
+Rayleigh process a few tenths of a Hz wide, which is the Watterson model that
+HF simulators are built on (ITU-R F.1487 quotes 0.1 Hz for a good path, 0.5 Hz
+moderate, 1 Hz poor).  That is why a 40 m signal at night flutters and fades
+every few seconds while a 2200 m trace holds still for an hour, and above
+:data:`DIFFUSE_ABOVE_HZ` this module renders the path that way.
 """
 
 from __future__ import annotations
@@ -29,10 +40,22 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .propagation import Band, moments
-from .scatter import Carrier
+from .scatter import Carrier, Component
 
 #: How fast the reflecting height moves: a quiet night, and a dawn transition.
 HEIGHT_RATE_RANGE = (0.05, 5.0)
+
+#: On HF the apparent vertical motion includes travelling disturbances in the
+#: F layer, and the irregularities inside the reflecting patch are what set
+#: the Doppler spread: both are metres a second, not tenths.
+HF_HEIGHT_RATE_RANGE = (0.3, 12.0)
+#: As an equivalent vertical speed in the patch: on 40 m at a typical take-off
+#: this is 0.05 to 1 Hz of rms spread, the ITU-R F.1487 good-to-poor range.
+HF_CHURN_RANGE = (2.5, 25.0)
+
+#: Above this the path is rendered as a diffuse Rayleigh channel per mode
+#: rather than as coherent carriers: 160 m and up.
+DIFFUSE_ABOVE_HZ = 1.5e6
 
 MAX_MODES = 3
 
@@ -57,6 +80,7 @@ class IonoSpec:
     wander_rate_hz: float = 0.004      # how fast the layer motion itself changes
     wander_mps: float = 0.2
     rays: int = 3000
+    diffuse: bool = False              # HF: Rayleigh-spread modes, not carriers
 
 
 def draw_iono(rng: np.random.Generator, band: Band, *, modes: int | None = None,
@@ -66,16 +90,20 @@ def draw_iono(rng: np.random.Generator, band: Band, *, modes: int | None = None,
               wander_mps: float | None = None,
               wander_rate_hz: float | None = None) -> IonoSpec:
     """Draw a path: how the layer is moving tonight, and how many ways in."""
+    diffuse = band.hz >= DIFFUSE_ABOVE_HZ
     count = (int(np.clip(modes, 1, MAX_MODES)) if modes is not None
-             else int(np.clip(1 + rng.poisson(0.8), 1, MAX_MODES)))
+             else int(np.clip(1 + rng.poisson(1.2 if diffuse else 0.8), 1, MAX_MODES)))
     if height_rate_mps is not None:
         bulk = float(height_rate_mps)
     else:
-        lo, hi = HEIGHT_RATE_RANGE
+        lo, hi = HF_HEIGHT_RATE_RANGE if diffuse else HEIGHT_RATE_RANGE
         bulk = float(np.exp(rng.uniform(np.log(lo), np.log(hi)))
                      * (1.0 if rng.random() < 0.5 else -1.0))
-    churn = (float(turbulence_mps) if turbulence_mps is not None
-             else float(np.exp(rng.uniform(np.log(0.05), np.log(1.5)))))
+    if turbulence_mps is not None:
+        churn = float(turbulence_mps)
+    else:
+        lo, hi = HF_CHURN_RANGE if diffuse else (0.05, 1.5)
+        churn = float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
     powers = rng.lognormal(0.0, 0.7, size=count)
     powers /= powers.sum()
     drawn = [
@@ -99,6 +127,7 @@ def draw_iono(rng: np.random.Generator, band: Band, *, modes: int | None = None,
                     else float(abs(bulk) * rng.uniform(0.2, 0.8) + 0.05)),
         wander_rate_hz=(float(wander_rate_hz) if wander_rate_hz is not None
                         else float(rng.uniform(0.001, 0.02))),
+        diffuse=diffuse,
     )
 
 
@@ -153,3 +182,58 @@ def iono_carriers(spec: IonoSpec, band: Band):
         "attenuation_db": 0.0,
     }
     return carriers, info
+
+
+def iono_components(spec: IonoSpec, band: Band, rng: np.random.Generator):
+    """The HF version: one Gaussian-spread Rayleigh component per mode.
+
+    Each mode is a cloud of ``rays`` with Doppler drawn about the mode's own
+    shift, the spread set by the churn in its reflecting patch, so the channel
+    is the sum of a few Rayleigh processes a few tenths of a Hz wide.  That
+    fades a few times a second, which is what HF does.  Returns
+    ``(components, info)`` with the same report keys as :func:`iono_carriers`.
+    """
+    lift = float(np.sin(np.radians(spec.elevation_deg)))
+    rays = max(int(spec.rays) // max(len(spec.modes), 1), 64)
+    components: list[Component] = []
+    detail: list[dict[str, float]] = []
+    for mode in spec.modes:
+        shift = float(band.doppler_hz(mode.height_rate_mps * lift))
+        sigma = float(band.doppler_hz(mode.turbulence_mps * lift))
+        freqs = rng.normal(shift, max(sigma, 1e-6), size=rays)
+        components.append(Component(
+            freqs=freqs, weights=np.full(rays, mode.power / rays), centre_hz=shift))
+        detail.append({"shift_hz": shift, "wander_hz": sigma,
+                       "height_rate_mps": mode.height_rate_mps,
+                       "level_db": 10.0 * float(np.log10(max(mode.power, 1e-9)))})
+
+    freqs = np.concatenate([c.freqs for c in components])
+    weights = np.concatenate([c.weights for c in components])
+    shift, spread = moments(freqs, weights)
+    powers = np.array([m.power for m in spec.modes])
+    shifts = np.array([d["shift_hz"] for d in detail])
+    sigmas = np.array([d["wander_hz"] for d in detail])
+    gaps = [abs(a - b) for i, a in enumerate(shifts) for b in shifts[i + 1:]]
+    info = {
+        "kind": "skywave",
+        "diffuse": True,
+        "modes": detail,
+        "elevation_deg": spec.elevation_deg,
+        "height_rate_mps": float(np.sum(powers * np.array(
+            [m.height_rate_mps for m in spec.modes])) / max(float(powers.sum()), 1e-12)),
+        "turbulence_mps": float(np.mean([m.turbulence_mps for m in spec.modes])),
+        "wander_mps": spec.wander_mps,
+        "beat_hz": float(min(gaps)) if gaps else 0.0,
+        "fade_period_s": 0.0,
+        "shift_hz": shift,
+        "spread_hz": spread,
+        "wander_hz": float(np.sum(powers * sigmas) / max(float(powers.sum()), 1e-12)),
+        "between_hz": float(moments(shifts, powers)[1]),
+        # Rice: a Rayleigh process with rms Doppler spread s crosses its own
+        # rms level about 0.9 s times a second, so call it a fade a second per
+        # Hz of spread.
+        "fades_per_s": spread,
+        "scatterers": int(freqs.size),
+        "attenuation_db": 0.0,
+    }
+    return components, info

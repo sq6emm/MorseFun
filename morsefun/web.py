@@ -36,10 +36,10 @@ import numpy as np
 from .cell import CHARACTER_VALUES, parse_character
 from .cli import OVERRIDES, describe
 from .morse import Timing, duration, parse, timeline
-from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, GROUPS, PROFILES
+from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, GROUPS, PROFILES, Draw, resolve
 from .propagation import parse_band
 from .render import (MODES, QRSS_DIT_S, Config, apply_qrss, mode_name,
-                     qrss_label, render)
+                     qrss_label, render, streams)
 from .wav import wav_bytes
 
 PAGE = Path(__file__).with_name("page.html")
@@ -69,6 +69,11 @@ def coerce(field: str, value):
     if field == "cell_character":
         return parse_character(value)
     hint = _TYPES.get(field, "float")
+    if hint.startswith("tuple"):
+        parts = (value.replace(",", " ").split() if isinstance(value, str) else list(value))
+        if len(parts) != 2:
+            raise ValueError(f"{field} wants two numbers")
+        return (float(parts[0]), float(parts[1]))
     if hint.startswith("bool"):
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
@@ -85,7 +90,11 @@ def config_from_payload(payload: dict) -> tuple[Config, str]:
     profile = str(payload.get("profile") or DEFAULT_PROFILE)
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}")
-    cfg = profile_config(profile)
+    # The seed comes first: the profile's ranges are drawn from it, so pinning
+    # the seed brings back the same evening on the band as well as the same cloud.
+    seed = coerce("seed", payload.get("seed"))
+    seed = int(seed) if seed is not None else secrets.randbelow(2**31)
+    cfg = profile_config(profile, streams(seed)["profile"])
     for key, value in payload.items():
         field = OVERRIDES.get(key)
         if field is None or field == "seed":
@@ -102,8 +111,7 @@ def config_from_payload(payload: dict) -> tuple[Config, str]:
         apply_qrss(cfg, float(qrss),
                    keep_rise=payload.get("rise_ms") not in (None, ""),
                    keep_rate=payload.get("rate") not in (None, ""))
-    seed = coerce("seed", payload.get("seed"))
-    cfg.seed = int(seed) if seed is not None else secrets.randbelow(2**31)
+    cfg.seed = seed
     return cfg, profile
 
 
@@ -176,10 +184,14 @@ class Renders:
         return found[0] if found else None
 
 
-def profile_config(name: str) -> Config:
-    """The config a profile amounts to, with nothing else on top of it."""
+def profile_config(name: str, rng: np.random.Generator | None = None) -> Config:
+    """The config a profile amounts to, with nothing else on top of it.
+
+    With an ``rng`` the profile's ranges are drawn; without one they sit at the
+    middle, which is what a form shows as the placeholder.
+    """
     cfg = Config()
-    for field, value in PROFILES[name].items():
+    for field, value in resolve(name, rng).items():
         setattr(cfg, field, value)
     return cfg
 
@@ -198,17 +210,28 @@ def profile_card(name: str) -> dict:
     pinned_band = "band" in PROFILES[name]
     defaults: dict[str, object] = {}
     for key, field in OVERRIDES.items():
+        drawn = PROFILES[name].get(field)
+        if isinstance(drawn, Draw):
+            defaults[key] = str(drawn)        # "6–14": drawn afresh every render
+            continue
         value = getattr(cfg, field, None)
         if value is not None and not isinstance(value, (tuple, list)):
             defaults[key] = value
     if dit >= QRSS_DIT_S:
         defaults["qrss"] = round(dit, 3)
+    wpm = PROFILES[name].get("wpm")
+    if dit >= QRSS_DIT_S:
+        speed = qrss_label(dit)
+    elif isinstance(wpm, Draw):
+        speed = f"{wpm} wpm"
+    else:
+        speed = f"{cfg.wpm:g} wpm"
     return {
         "name": name,
         "about": DESCRIPTIONS.get(name, ""),
         "band": parse_band(cfg.band).label if pinned_band else "any band",
         "mode": mode_name(cfg.scatter).replace("none", "direct"),
-        "speed": qrss_label(dit) if dit >= QRSS_DIT_S else f"{cfg.wpm:g} wpm",
+        "speed": speed,
         "defaults": defaults,
     }
 
@@ -222,6 +245,7 @@ def options() -> dict:
         "default_profile": DEFAULT_PROFILE,
         "characters": ["auto", *CHARACTER_VALUES],
         "scatter": [name for name in MODES],
+        "qrm_style": ["ragchew", "contest", "mixed"],
         "qrss": [3, 10, 30, 60, 120],
     }
 

@@ -10,8 +10,11 @@ you and the other goes away, so the echo comes back spread:
 
     limb speed = omega * R,   spread ~ 2 * omega * R / lambda
 
-A quiet 0.2 deg/day puts 0.07 Hz on a 2 m echo and 5 Hz on 10 GHz; a busy
-8 deg/day puts 3 Hz on 2 m and 230 Hz on 10 GHz.  Operators watch for the days
+That is the limb-to-limb figure: a quiet 0.2 deg/day puts the limbs 0.07 Hz
+apart on 2 m and 5 Hz apart on 10 GHz, a busy 8 deg/day 3 Hz and 230 Hz.  The
+rms spread of the echo, which is what the report quotes and what a bin has to
+hold, is about 0.4 of that with the disc weighted towards its middle: 0.03 Hz
+and 1.8 Hz at the quiet end.  Operators watch for the days
 when that number is small and call it libration minimum, and this is why: the
 spread cannot be tuned out, and once it is wider than the bin a QRSS trace is
 being integrated in, the trace smears and the processing gain goes with it.

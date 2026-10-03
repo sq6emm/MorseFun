@@ -39,7 +39,7 @@ import numpy as np
 from .dsp import smooth_noise
 from .propagation import (Band, drop_diameters, drop_fall_speed, flake_diameters,
                           flake_fall_speed, moments, rain_attenuation_db_km,
-                          reflectivity_dbz, snow_relative_db, weighted_median)
+                          reflectivity_dbz, weighted_median)
 from .scatter import Component
 
 #: The character axis: 0 is flat stratiform rain, 1 a deep convective core.
@@ -240,7 +240,8 @@ class Cell:
     @property
     def rate_mm_h(self) -> float:
         """The rate that matters: the cores weighted by how hard they scatter."""
-        weights = [10.0 ** (reflectivity_dbz(c.rate_mm_h) / 10.0) for c in self.cores]
+        weights = [10.0 ** (reflectivity_dbz(c.rate_mm_h, self.kind, self.wet) / 10.0)
+                   for c in self.cores]
         total = sum(weights)
         if total <= 0:
             return 0.0
@@ -279,7 +280,8 @@ def draw_cell(
 
     Rain and snow are drawn from the same shape, with snow pinned near the
     stratiform end of the character axis -- it falls out of layered cloud, a
-    metre a second, with little inside it to churn the air.
+    metre a second, with little inside it to churn the air -- and at the low
+    melted rates a snowfall actually has.
     """
     snow = str(kind).lower() == "snow"
 
@@ -295,7 +297,9 @@ def draw_cell(
     if rate_mm_h is not None:
         rate = float(max(rate_mm_h, 0.05))
     elif snow:
-        rate = float(np.clip(0.6 + 7.0 * char + rng.lognormal(0.0, 0.3), 0.3, 12.0))
+        # Melted-equivalent: a steady snowfall is a millimetre an hour or so,
+        # and a heavy one two or three.
+        rate = float(np.clip((0.4 + 2.5 * char) * rng.lognormal(0.0, 0.4), 0.2, 6.0))
     else:
         rate = rate_from_character(char, rng)
 
@@ -462,7 +466,8 @@ def cell_doppler(
         reach = cell.geometry.blob_sigma_m()[0] / 1000.0
         spill = abs(core.offset_km) / max(reach + core.size_km / 2.0, 0.2)
         illumination = float(np.exp(-0.5 * spill**2))
-        powers.append(10.0 ** (reflectivity_dbz(core.rate_mm_h) / 10.0) * illumination)
+        powers.append(10.0 ** (reflectivity_dbz(core.rate_mm_h, cell.kind, cell.wet) / 10.0)
+                      * illumination)
         samples.append(CoreSample(
             core=core, freqs=freqs, weights=weights, sizes=sizes,
             centre_hz=centre, spread_hz=spread, power=illumination,
@@ -470,7 +475,6 @@ def cell_doppler(
         ))
 
     total_power = float(sum(powers))
-    ice_db = snow_relative_db(cell.wet) if cell.kind == "snow" else 0.0
     for sample, power in zip(samples, powers):
         share = power / total_power if total_power > 0 else 1.0 / len(samples)
         sample.weights = sample.weights * share
@@ -492,7 +496,10 @@ def cell_doppler(
         "cell": cell.name,
         "character": cell.character,
         "rate_mm_h": cell.rate_mm_h,
-        "dbz": (10.0 * float(np.log10(total_power)) + ice_db if total_power > 0
+        # The cores share the volume, so what the pair sees is the average of
+        # their reflectivities, not the sum: four cores of 12 mm/h are still a
+        # 12 mm/h cell, not one 6 dB louder.
+        "dbz": (10.0 * float(np.log10(total_power / len(samples))) if total_power > 0
                 else float("-inf")),
         "shift_hz": shift,
         "spread_hz": spread,
@@ -529,7 +536,6 @@ def cell_doppler(
     }
     if cell.kind == "snow":
         info["median_melted_mm"] = weighted_median(sizes, weights)
-        info["relative_db"] = ice_db
     else:
         info["median_drop_mm"] = weighted_median(sizes, weights)
     return samples, info

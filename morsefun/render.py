@@ -4,8 +4,8 @@ The chain mirrors a station on the air.  The wanted signal is keyed, optionally
 scattered off a rain cell, falling snow or an auroral curtain, and attenuated by
 the weather it went through; everything else on the band is generated
 separately; both go through the same IF filter; the noise bus is scaled to hit
-the requested signal-to-noise ratio in that bandwidth; and the sum passes a soft
-limiter the way an AGC rounds off a static crash.
+the requested signal-to-noise ratio in that bandwidth; and the sum goes through
+an AGC, which is what rounds off a static crash in a real receiver.
 
 Each random part of the render draws from its own independent stream, spawned
 from the seed, so turning one effect on does not reshuffle any of the others.
@@ -22,7 +22,7 @@ import numpy as np
 from .aircraft import aircraft_track, draw_aircraft
 from .cell import (Cell, cell_doppler, draw_cell, evolution, parse_character,
                    sounds_like)
-from .dsp import bandpass, db_to_amp, fast_length, rms, soft_limit
+from .dsp import agc, bandpass, db_to_amp, fast_length, rms
 from .moon import draw_moon, faraday_fade, moon_doppler
 from .morse import Timing, duration, parse, timeline, to_code
 from .noise import NoiseSpec, build_noise
@@ -32,12 +32,13 @@ from .scatter import (Component, EvolvingSpectrum, ScatterSpec, activity_gate,
                       apply_channel, audible_fraction, block_size, channel,
                       coherent_channel, doppler_spectrum, evolving_channel,
                       frame_count, rician_weights, scintillate, swept_channel)
-from .skywave import draw_iono, iono_carriers
+from .skywave import draw_iono, iono_carriers, iono_components
 from .synth import ToneSpec, keyed_tone
 
 #: Every random stream in a render, in a fixed order, so a given seed always
 #: hands the same numbers to the same part of the chain.
-STREAMS = ("signal", "weather", "scatter", "floor", "crashes", "qrm", "birdies")
+STREAMS = ("signal", "weather", "scatter", "floor", "crashes", "qrm", "birdies",
+           "profile")
 
 #: The modes that are a volume of weather with cores in it.
 WEATHER_MODES = ("rain", "snow")
@@ -183,6 +184,8 @@ class Config:
     crash_db: float = 22.0
     qrm_count: int = 1
     qrm_db: tuple[float, float] = (-6.0, 8.0)
+    qrm_wpm: tuple[float, float] = (14.0, 32.0)
+    qrm_style: str = "ragchew"           # ragchew | contest | mixed
     birdie_count: int = 0
     birdie_db: float = 4.0
     # output
@@ -214,6 +217,8 @@ class Config:
             crash_db=self.crash_db,
             qrm_count=self.qrm_count,
             qrm_db=tuple(self.qrm_db),
+            qrm_wpm=tuple(self.qrm_wpm),
+            qrm_style=str(self.qrm_style),
             birdie_count=self.birdie_count,
             birdie_db=self.birdie_db,
         )
@@ -361,6 +366,17 @@ def _narrow_block(spread_hz: float, sample_rate: int, size: int) -> int:
     return block_size(max(float(spread_hz), 1e-3), sample_rate, size, hi=1 << 20)
 
 
+def hf_sounds_like(spread_hz: float) -> str:
+    """What an HF Doppler spread of this size does to a CW note."""
+    if spread_hz < 0.15:
+        return "steady, a slow swell on it: a good night"
+    if spread_hz < 0.6:
+        return "fading every second or two, the usual HF sound"
+    if spread_hz < 2.0:
+        return "fluttery, hard going: a disturbed path"
+    return "auroral flutter, the note torn up"
+
+
 def _iono_path(cfg: Config, env: np.ndarray, band: Band,
                rngs: dict[str, np.random.Generator]):
     """A low band: one or more coherent hops off a layer that will not hold still."""
@@ -368,18 +384,34 @@ def _iono_path(cfg: Config, env: np.ndarray, band: Band,
                      height_rate_mps=cfg.layer_rate_mps,
                      turbulence_mps=cfg.layer_turbulence_mps,
                      elevation_deg=cfg.takeoff_deg)
-    carriers, info = iono_carriers(spec, band)
-
-    info["tuned_out_hz"] = 0.0
-    if cfg.retune:
-        # The operator sits on the trace, not on the nominal frequency.
-        info["tuned_out_hz"] = float(info["shift_hz"])
-        for carrier in carriers:
-            carrier.shift_hz -= float(info["shift_hz"])
-    info["audible_fraction"] = 1.0
-    info["sounds_like"] = sounds_like(float(info["spread_hz"]),
-                                      float(info["audible_fraction"]))
-    process = coherent_channel(env.size, cfg.sample_rate, carriers, rngs["scatter"])
+    if spec.diffuse:
+        # HF: each mode is a Rayleigh process a few tenths of a Hz wide, so the
+        # signal flutters and fades every second or two on its own.
+        components, info = iono_components(spec, band, rngs["weather"])
+        freqs = np.concatenate([c.freqs for c in components])
+        weights = np.concatenate([c.weights for c in components])
+        grid, psd = doppler_spectrum(freqs, weights,
+                                     smooth_hz=max(float(info["spread_hz"]) / 12.0, 1e-3))
+        info["tuned_out_hz"] = 0.0
+        if cfg.retune:
+            info["tuned_out_hz"] = float(info["shift_hz"])
+            grid = grid - float(info["shift_hz"])
+        info["audible_fraction"] = audible_fraction(
+            grid, psd, cfg.freq, cfg.bandwidth, cfg.sample_rate)
+        info["sounds_like"] = hf_sounds_like(float(info["spread_hz"]))
+        process = channel(env.size, cfg.sample_rate, grid, psd, cfg.freq, rngs["scatter"])
+    else:
+        carriers, info = iono_carriers(spec, band)
+        info["tuned_out_hz"] = 0.0
+        if cfg.retune:
+            # The operator sits on the trace, not on the nominal frequency.
+            info["tuned_out_hz"] = float(info["shift_hz"])
+            for carrier in carriers:
+                carrier.shift_hz -= float(info["shift_hz"])
+        info["audible_fraction"] = 1.0
+        info["sounds_like"] = sounds_like(float(info["spread_hz"]),
+                                          float(info["audible_fraction"]))
+        process = coherent_channel(env.size, cfg.sample_rate, carriers, rngs["scatter"])
     depth = 0.0 if cfg.scintillation_db is None else float(cfg.scintillation_db)
     info["scintillation_db"] = depth
     if depth > 0:
@@ -633,12 +665,13 @@ def render(text: str, config: Config | None = None) -> Render:
     out = out[:wanted]
     key_down, key_up = key_down[:wanted], key_up[:wanted]
 
-    # Level: set the loud-but-not-crash level first, limit, then fill the file.
+    # Level: set the loud-but-not-crash level first, let the AGC round off
+    # whatever is louder than that, then fill the file.
     reference = float(np.percentile(np.abs(out), 99.5)) if out.size else 0.0
     if reference > 1e-12:
         out = out * (0.7 / reference)
     if cfg.limit:
-        out = soft_limit(out)
+        out = agc(out, cfg.sample_rate)
     peak = float(np.max(np.abs(out))) if out.size else 0.0
     if peak > 1e-12:
         out = out * (cfg.peak / peak)

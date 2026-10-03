@@ -10,7 +10,7 @@ from morsefun.propagation import (REFERENCE_RATE_MM_H, AuroraSpec, aurora_dopple
                                   drop_diameters, drop_fall_speed, flake_diameters,
                                   flake_fall_speed, moments, parse_band,
                                   rain_attenuation_db_km, reflectivity_dbz,
-                                  snow_relative_db, weighted_median)
+                                  weighted_median)
 from morsefun.render import STREAMS, streams
 from morsefun.scatter import audible_fraction, channel, doppler_spectrum
 
@@ -50,7 +50,18 @@ class TestBand(unittest.TestCase):
     def test_reflectivity_grows_with_rate(self):
         self.assertAlmostEqual(reflectivity_dbz(REFERENCE_RATE_MM_H), 40.3, places=1)
         self.assertLess(reflectivity_dbz(2.0), reflectivity_dbz(50.0))
-        self.assertLess(snow_relative_db(False), snow_relative_db(True))
+
+    def test_snow_follows_the_aggregate_relation(self):
+        # Gunn and Marshall: Z = 2000 R^2 for aggregates, melted rate.  For the
+        # same water a snowfall is bigger, slower particles, so its equivalent
+        # reflectivity is *higher* than rain's; it is weak on the air because
+        # snowfall rates are low, not because a flake scatters badly.
+        self.assertAlmostEqual(reflectivity_dbz(1.0, "snow"), 33.0, places=1)
+        self.assertGreater(reflectivity_dbz(4.0, "snow"), reflectivity_dbz(4.0, "rain"))
+        self.assertLess(reflectivity_dbz(1.0, "snow"), reflectivity_dbz(REFERENCE_RATE_MM_H))
+        # The melting layer is the bright band, several dB above the snow.
+        self.assertAlmostEqual(reflectivity_dbz(1.0, "snow", wet=True)
+                               - reflectivity_dbz(1.0, "snow"), 7.0, places=6)
 
 
 class TestPopulations(unittest.TestCase):

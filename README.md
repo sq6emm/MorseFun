@@ -17,9 +17,10 @@ playing through aplay
   text      cq cq de sq6emm sq6emm k
   code      -.-. --.-  /  -.-. --.-  /  -.. .  /  ... --.- -.... . -- --  /  ... --.- -.... . -- --  /  -.-
   keying    23 wpm, dit 52.2 ms, standard spacing
-  tone      600 Hz, drift ±1.5 Hz, QSB 6 dB
-  band      typical: S/N 10 dB in 500 Hz, QRN 0.8/s at +22 dB, measured 8.5 dB
-            f0lv at -286 Hz, 17 wpm, +3 dB
+  tone      600 Hz, drift ±1.15 Hz, QSB 5 dB
+  band      typical: S/N 12 dB in 500 Hz, QRN 0.6/s at +22 dB, measured 12.2 dB
+            yo8e at +337 Hz, 32 wpm, -3 dB: "test yo8e"
+            sq3pp at -370 Hz, 30 wpm, +4 dB: "r r ur8ux de sq3pp gm es tnx fer call <BT> ur rst 559 559"
   audio     13.0 s, 44100 Hz, 1124 KB, seed 23
 ```
 
@@ -30,13 +31,17 @@ command line player the machine already has, over a pipe. `aplay`, `pw-play`,
 `paplay`, `ffplay`, `sox play` and `afplay` are recognised, in that order.
 
 ```bash
-python -m morsefun "cq de sq6emm k" --repeat 3 --gap 2    # three times over, for practice
+python -m morsefun "cq de sq6emm k" --repeat 3 --gap 2    # three times over, a new band each time
 python -m morsefun --list-players                         # what is installed here
 python -m morsefun "cq test" --player "ffplay -nodisp -autoexit -"
 ```
 
 `--player` takes a full command line ending in the argument that means standard
 input, so anything that reads a WAV from a pipe will do. Ctrl-C stops playback.
+`--repeat` does not play the same file again: every pass is rendered afresh, on a
+freshly drawn band, with seeds counting on from the first, so practice means the
+same text under conditions that keep changing. The extra passes are reported in a
+line each.
 
 `-o cq.wav` writes a file instead of playing; `-o cq.wav --play` does both.
 
@@ -62,7 +67,8 @@ same mode have in common; every render reports its seed, and pinning the seed
 brings that one back.
 
 Every control can be left blank, and blank means *whatever the profile says*,
-with the profile's own value shown in the box. That matters more than it sounds:
+with the profile's own value shown in the box — or its range, like `6–14`, for a
+knob the profile draws afresh every render. That matters more than it sounds:
 a form that insists on its own 23 wpm would key a QRSS profile at 23 wpm, and a
 transmission that should run for six minutes comes out as thirteen seconds of
 something else.
@@ -127,7 +133,7 @@ a hiss.
 python -m morsefun "cq cq de sq6emm sq6emm k" --profile rain-scatter
 python -m morsefun "cq de sq6emm k" --profile light-rain      # almost clean CW
 python -m morsefun "cq de sq6emm k" --profile storm-front     # aurora-like
-python -m morsefun "cq de sq6emm k" --scatter snow --snow-wet
+python -m morsefun "cq de sq6emm k" --scatter snow --snow-wet   # the bright band
 python -m morsefun "cq de sq6emm k" --profile aurora          # 2 m, where it works
 ```
 
@@ -202,10 +208,15 @@ Two things follow from the physics and are reported rather than hidden:
 
 **Reflectivity sets the level.** Received power follows the scattering volume's
 reflectivity, so 12 mm/h of rain is the yardstick at which `--snr` means what it
-says, 45 mm/h comes back 9 dB stronger, and dry snow at 4 mm/h is 14 dB weaker
-and barely copyable. `--no-weather-level` turns that coupling off. Rain also
-attenuates the path it crosses — ITU-R P.838, 0.277 dB/km at 12 mm/h on 10 GHz —
-which `--path-km` applies.
+says and 45 mm/h comes back 9 dB stronger. Snow follows the aggregate relation,
+`Z = 2000 R^2` with `R` the melted rate: for the same water a snowfall is bigger,
+slower particles, so its *equivalent* reflectivity is higher than rain's, and
+what makes snow scatter weak on the air is that snowfall rates are low — a
+millimetre an hour melted is 7 dB down on the yardstick — while the melting layer,
+the bright band, comes back 7 dB above the dry snow feeding it.
+`--no-weather-level` turns that coupling off. Rain also attenuates the path it
+crosses — ITU-R P.838, 0.277 dB/km at 12 mm/h on 10 GHz — which `--path-km`
+applies, and which is why a storm core is loud and attenuated at once.
 
 **Aurora is not a 10 GHz mode, and the model says so.** A curtain drifting at
 600 m/s puts 579 Hz of Doppler on a 2 m signal, which is the familiar hoarse
@@ -220,27 +231,28 @@ The report says what the draw came up with, and what it sounds like:
   text      cq de sq6emm k
   code      -.-. --.-  /  -.. .  /  ... --.- -.... . -- --  /  -.-
   keying    23 wpm, dit 52.2 ms, standard spacing
-  tone      600 Hz, drift ±1.0 Hz, QSB 2 dB
+  tone      600 Hz, drift ±0.873 Hz, QSB 2 dB
   path      10 GHz, λ 30.0 mm, 67 Hz per m/s
-            geometry  14.0° this end and 23.9° the other, 20° off the path
-            volume 1.0 km up, 0.16×0.06×0.06 km, bistatic 137°
-            so 0.36 of any motion is heard, stations 6 km apart
-  scatter   storm rain 62.7 mm/h, 57 dBZ: Doppler -33 Hz tuned out, spread 176 Hz, 86% inside the filter
+            geometry  20.2° this end and 34.5° the other, 20° off the path
+            volume 1.0 km up, 0.08×0.04×0.04 km, bistatic 122°
+            so 0.48 of any motion is heard, stations 4 km apart
+  scatter   storm rain 57.5 mm/h, 50 dBZ: Doppler +52.6 Hz tuned out, spread 222 Hz, 75% inside the filter
             — rough and wide, hard going
-            4 cores  +239 Hz/123 Hz at -9 dB, +121 Hz/162 Hz at -10 dB
-            -127 Hz/126 Hz at -5 dB, -28 Hz/119 Hz at -3 dB
-            6000 scatterers, median drop 3.2 mm, lift +1.0 m/s ±4.6 per km
-            turbulence 6.7 m/s, wind 16 m/s from 115° (-2.5 m/s along the bisector)
-            shear 20 m/s per km, rearranging every 1.5 s, QSB 11 dB on top
-            on the signal: reflectivity +16.5 dB, outside the filter -0.6 dB
-            path attenuation 26.5 dB
-  band      storm-front: S/N 24 dB in 500 Hz (asked 8, weather +16), QRN 3/s at +24 dB, measured 20.2 dB
-            i4sad at -278 Hz, 24 wpm, -1 dB, storm cell, spread 261 Hz
+            4 cores  +381 Hz/151 Hz at -9 dB, +224 Hz/200 Hz at -10 dB
+            -95 Hz/163 Hz at -5 dB, +38 Hz/154 Hz at -3 dB
+            6000 scatterers, median drop 3.1 mm, lift +1.0 m/s ±4.5 per km
+            turbulence 6.3 m/s, wind 16 m/s from 115° (-2.5 m/s along the bisector)
+            shear 19 m/s per km, rearranging every 1.6 s, QSB 10 dB on top
+            on the signal: reflectivity +9.9 dB, outside the filter -1.2 dB
+            on the way: path attenuation -13.2 dB
+  band      storm-front: S/N 3 dB in 500 Hz (asked 7, weather -5), measured 1.9 dB
   audio     7.8 s, 44100 Hz, 674 KB, seed 4
 ```
 
 By default the return is tuned back onto your own note the way an operator
-would; `--no-retune` leaves it where the Doppler put it. `--rician 6` mixes a
+would, and the audio really is centred there — the report's `tuned out` figure is
+measured on the output, not just claimed; `--no-retune` leaves it where the
+Doppler put it. `--rician 6` mixes a
 direct path back in at 6 dB above the scatter, for a path that is not entirely
 over the horizon.
 
@@ -327,11 +339,68 @@ otherwise drawn.
             — almost clean CW, just a flutter on it
             layer falling 0.80 m/s at 26° take-off, wandering 0.27 mHz
             modes 0.22 mHz apart, so it fades every 232 min
-  band      lf-qrss: S/N -12 dB in 200 Hz, QRN 5/s at +28 dB, measured -16.0 dB
+  band      lf-qrss: S/N -12 dB in 200 Hz, QRN 5.3/s at +28 dB, measured -18.1 dB
             carrier at +83 Hz, +2 dB
   qrss      QRSS3: dit 3 s, read in a bin 0.333 Hz wide, +28 dB on the 200 Hz filter
-            so S/N -12 dB in the filter reads +16 dB on the waterfall
+            so S/N -12 dB in the filter reads +15 dB on the waterfall
   audio     352.2 s, 8000 Hz, 5503 KB, seed 4
+```
+
+## HF: a channel that flutters, and a contest weekend
+
+```bash
+python -m morsefun "cq de sq6emm k" --profile 40m-dx
+python -m morsefun "cq test sq6emm sq6emm test" --profile contest-40m
+python -m morsefun "tu 5nn 15" --profile contest-20m
+python -m morsefun "cq de sq6emm k" --qrm 8 --qrm-style contest       # any band, a pile-up
+```
+
+Above 160 m `--scatter iono` stops being a few carriers and becomes what an HF
+receiver actually sees. The same layer motion is a hundred times more Doppler on
+40 m than on 2200 m, the reflection is a patch of irregularities rather than a
+point, and the hops and the two magneto-ionic components all arrive at once; so
+each mode is rendered as a **Rayleigh process a few tenths of a Hz wide**, which
+is the Watterson channel that HF modem simulators use (ITU-R F.1487: 0.1 Hz of
+spread on a good path, 0.5 moderate, 1 Hz poor). A note like that fades about
+once a second per Hz of spread — every two or three seconds on an ordinary night —
+and it does so on its own; the profiles turn the QSB knob off because the path
+already is the fading. `--layer-churn` and `--takeoff` pin the spread,
+`--iono-modes` the number of ways in.
+
+```
+  path      7.03 MHz, λ 42.6 m, 46.90 mHz per m/s
+  scatter   skywave, 2 mode(s): Doppler +0.358 Hz tuned out, spread 0.378 Hz, 100% inside the filter
+            — fading every second or two, the usual HF sound
+            layer rising 11.22 m/s at 44° take-off
+            each mode a Rayleigh flutter 0.361 Hz wide, modes 0.033 Hz apart
+            so it fades about every 2.6 s
+  band      40m-dx: S/N 7 dB in 500 Hz, QRN 1.9/s at +22 dB, measured 5.8 dB
+```
+
+The **contest** profiles put six to ten other stations inside the one filter,
+sending what a contest sounds like — `cq test`, `5nn 14`, serial numbers, `tu`,
+`agn?` — at 26 to 40 wpm, with a pile-up sitting within a few tens of Hz of your
+own note because that is where a pile-up sits. Every station on the band keeps
+going for the whole render: it calls, listens for a second, calls again, each
+over freshly drawn, so the band is as busy at the end of the file as at the
+start. `--qrm-style contest` does the same to any profile, `--qrm-wpm` sets
+how fast they send, and the report lists every one of them with what it was
+sending when you tuned in:
+
+```
+  scatter   skywave, 2 mode(s): Doppler +0.013 Hz tuned out, spread 0.469 Hz, 100% inside the filter
+            — fading every second or two, the usual HF sound
+  band      contest-40m: S/N 11 dB in 500 Hz, QRN 1/s at +22 dB, measured 8.5 dB
+            ea2ho at -303 Hz, 28 wpm, +1 dB: "tu ea2ho test"
+            gm4l at +288 Hz, 28 wpm, -5 dB: "nr 859 859 tu"
+            oh7ja at +44 Hz, 34 wpm, -8 dB: "ea9rr 5nn 9"
+            yo6ias at -185 Hz, 38 wpm, +2 dB: "sq4l sq4l de yo6ias 5nn 253 k"
+            ok7b at +189 Hz, 30 wpm, +2 dB: "on0h on0h de ok7b 5nn 1215 k"
+            gm5eba at +48 Hz, 37 wpm, +2 dB: "oh6vt tu 5nn 32 32"
+            ok7vo at +195 Hz, 34 wpm, -7 dB: "ve4b ur 5nn 73 bk"
+            dl3p at +354 Hz, 33 wpm, +6 dB: "on8i tu 5nn 10 10"
+            yo0d at +73 Hz, 34 wpm, -6 dB: "yo0d 599 1 tu"
+  audio     10.3 s, 44100 Hz, 887 KB, seed 1
 ```
 
 ## EME: 2.5 seconds behind you
@@ -394,9 +463,9 @@ middle. That smears fast CW and is neither here nor there at QRSS speeds.
             6000 patches, cos^1.6 across the disc
             own Doppler +203 Hz, drifting +0.74 mHz a second, both followed
             Faraday 22 dB nulls every 19 min
-  band      eme-qrss: S/N -6 dB in 300 Hz, QRN 0.2/s at +22 dB
+  band      eme-qrss: S/N -5 dB in 300 Hz, measured -6.1 dB
   qrss      QRSS3: dit 3 s, read in a bin 0.333 Hz wide, +30 dB on the 300 Hz filter
-            so S/N -6 dB in the filter reads +24 dB on the waterfall
+            so S/N -5 dB in the filter reads +25 dB on the waterfall
   audio     354.7 s, 8000 Hz, 5543 KB, seed 12
 ```
 
@@ -441,7 +510,7 @@ drawn; the pass is centred on the message, because nobody keys into an empty sky
             sliding -12.5 Hz a second, +235 Hz to +0.00 mHz
             73 m of aeroplane, so 2.12 Hz of roughness on the note
             loudest 19 s in, usable for 19 s
-  band      air-scatter: S/N 6 dB in 500 Hz, QRN 0.05/s at +22 dB, measured 5.0 dB
+  band      air-scatter: S/N 8 dB in 500 Hz, measured 7.5 dB
   audio     18.6 s, 44100 Hz, 1602 KB, seed 11
 ```
 
@@ -460,18 +529,27 @@ OS, so no two renders see the same cell — a different character, different
 cores, a different path into it. The seed that was used is always reported, so
 any front you liked can be heard again, at another speed if you want.
 
+The profiles draw too. Most of what a profile says is a range rather than a
+number — `typical` is 6 to 14 dB of signal, nought to two neighbours, 3 to 9 dB
+of QSB — resolved once per render from the same seed, so two renders of the same
+profile are two different evenings on the band and not the same evening with
+different noise samples. Only what would change what the mode *is* stays pinned:
+the band, the path, a QRSS profile's dit. The web page shows a drawn knob as its
+range, `6–14`, in the placeholder. `--repeat`, a batch, and *another one like it*
+in the browser all count the seed on, one draw per pass.
+
 ## The band
 
-The noise is not an ideal AWGN channel; it is a lazy imitation of an HF receiver
-on a mediocre day. Four things are generated separately, mixed on one bus and run
+The noise is not an ideal AWGN channel; it is an imitation of a receiver on the
+band in question. Four things are generated separately, mixed on one bus and run
 through the same IF filter:
 
 | What | Flag | Model |
 | --- | --- | --- |
-| Noise floor | `--snr`, `--bandwidth`, `--tilt` | Gaussian noise with a 1/f atmospheric tilt, band-limited to the filter |
-| Scatter | `--scatter`, see above | rain, snow or aurora, sampled scatterer by scatterer |
-| Static crashes (QRN) | `--qrn`, `--qrn-db` | Poisson arrivals, log-normal strengths, each a decaying broadband burst |
-| Other stations (QRM) | `--qrm`, `--qrm-db` | Real CW: random callsigns and patterns, own speed, tone offset, drift and fading |
+| Noise floor | `--snr`, `--bandwidth`, `--tilt` | Gaussian noise band-limited to the filter, with a 1/f atmospheric tilt on HF and below and flat receiver noise on VHF and up |
+| Scatter | `--scatter`, see above | rain, snow, aurora, skywave, the Moon, an aeroplane |
+| Static crashes (QRN) | `--qrn`, `--qrn-db` | Poisson arrivals, log-normal strengths, each a decaying broadband burst — lightning, so an HF and LF thing: the VHF and microwave profiles have none |
+| Other stations (QRM) | `--qrm`, `--qrm-db`, `--qrm-wpm`, `--qrm-style` | Real CW: random callsigns, chat or contest exchanges, own speed, tone offset, drift and fading, calling and listening for the whole render |
 | Heterodynes | `--birdies`, `--birdie-db` | A carrier that drifts slowly and never says anything |
 
 The wanted signal gets its own imperfections: a finite envelope rise and fall
@@ -484,8 +562,13 @@ fading sit on top of that, so the `measured` figure in the report — everything
 in the key-up gaps against the key-down average — usually comes out a decibel or
 two below what you asked for. That gap is the rest of the band, not an error.
 
-Finally the mix passes a tanh soft limiter, the way an AGC rounds off a crash
-instead of clipping it square. `--no-limit` turns that off.
+Finally the mix goes through the receiver's **AGC**: a gain that drops within
+2 ms when a crash arrives and comes back over 120 ms, the fast setting a CW
+operator uses, so a crash is rounded off and the floor sags and recovers behind
+it the way it does in a real receiver. It is a gain, not a bend in the waveform —
+the tanh limiter it replaces left the third harmonic of the note 29 dB down at
+1800 Hz, outside any CW filter, where no receiver puts anything. `--no-limit`
+switches the AGC off.
 
 ## Profiles
 
@@ -499,8 +582,10 @@ LF / MF  — 2200 m and 630 m: a stable path under a floor of lightning, so the 
   mf-qrss       630 m QRSS3: still razor thin, a little more layer motion
   lf-cw         2200 m at 8 wpm: readable by ear, buried in lightning
 
-HF  — the ionosphere arriving by more than one path at once, which is where fading comes from
-  40m-dx        40 m at night: three hops beating against each other
+HF  — the ionosphere arriving by more than one path at once, each a Rayleigh flutter a few tenths of a Hz wide: that is where the fading comes from
+  40m-dx        40 m at night: two or three modes, fluttering and fading every second or two
+  contest-40m   40 m on a contest night: six to ten stations in the filter, a pile-up on you
+  contest-20m   20 m contest by day: quieter floor, the same wall of stations at 30 wpm
   30m-qrss      30 m QRSS3: the knights' band, fuzzy and wandering
 
 VHF / UHF  — line of sight, and the three ways past it: tropo, an auroral curtain, and the Moon
@@ -513,18 +598,18 @@ Microwave  — 10 GHz, where the weather is the propagation: rain, snow, aeropla
   tropo-10g     10 GHz tropo: scintillating, and the rig wanders
   rain-scatter  10 GHz off a rain cell: a different front every time
   light-rain    10 GHz off layered rain on a long path: almost clean CW
-  heavy-rain    10 GHz off a downpour: 45 mm/h, loud, wide and attenuated
-  storm-front   10 GHz into a storm: four cores, lift, shear, aurora-like
-  dry-snow      10 GHz off dry snow: narrow, wind-shifted and very weak
-  wet-snow      10 GHz off the melting layer: the bright band, much stronger
+  heavy-rain    10 GHz off a downpour: 30 to 70 mm/h, loud, wide and attenuated
+  storm-front   10 GHz into a storm: several cores, lift, shear, aurora-like
+  dry-snow      10 GHz off dry snow: narrow, wind-shifted, a few dB down
+  wet-snow      10 GHz off the melting layer: the bright band, stronger than rain
   air-scatter   10 GHz off an airliner: a note that slides and is gone
   eme-10g       10 GHz moonbounce: 30 kHz of Doppler tracked out
 
 Any band  — band conditions on their own, with no propagation model behind them
-  typical       S/N 10 dB, slow fading, one neighbour in the pass band (default)
+  typical       S/N 6 to 14 dB, slow fading, a neighbour or two in the pass band (default)
   quiet         good conditions, strong signal, the odd crash
-  noisy         weak signal, deep QSB, crashes and two other stations
-  contest       a crowded band: four stations and a carrier in a 700 Hz filter
+  noisy         weak signal, deep QSB, crashes and other stations
+  contest       a crowded band: four to seven stations and a carrier in a 700 Hz filter
   thunderstorm  heavy static, crashes several times a second
   worn-rig      clean band, drifting VFO and mains hum on the carrier
   clean         bare tone, no band at all
@@ -532,9 +617,11 @@ Any band  — band conditions on their own, with no propagation model behind the
 
 Profiles are grouped by band, because that is the order the questions come in:
 where are you, and then what did the signal do to get here. A profile only sets
-defaults; anything on the command line still wins, so `--profile noisy --snr 12`
-is a bad band with a strong signal in it, and `--profile lf-qrss --qrss 60` is
-2200 m with a minute to each dit.
+defaults, most of them ranges drawn afresh for every render; anything on the
+command line still wins, so `--profile noisy --snr 12` is a bad band with a strong
+signal in it, and `--profile lf-qrss --qrss 60` is 2200 m with a minute to each
+dit. The noise floor follows the band: lightning and the 1/f tilt belong to HF
+and below, and a 2 m or 10 GHz profile has white receiver noise and nothing else.
 
 ## Many files at once
 
@@ -549,8 +636,10 @@ the message. Each line gets its own seed, so the band is different on every file
 ## Repeating a render
 
 Every run reports the seed it used. Pass it back with `--seed` and you get the
-same crashes, the same neighbours and the same fades again — useful when you want
-the same band conditions at two different speeds.
+same evening on the band — the same draw of the profile, the same crashes, the
+same neighbours and the same fades — useful when you want the same conditions at
+two different speeds. A `--repeat` or a batch run with `--seed` comes back whole,
+because each pass counts on from it.
 
 ## Using it as a library
 
@@ -600,7 +689,9 @@ because it is a modelling choice rather than a result.
 * K. L. S. Gunn and J. S. Marshall, "The distribution with size of aggregate
   snowflakes", *Journal of Meteorology*, vol. 15, pp. 452–461, 1958. Aggregate
   sizes as melted diameter, in the commonly quoted form `Λ = 25.5 R^-0.48` —
-  `flake_diameters`.
+  `flake_diameters` — and the aggregate-snow reflectivity relation
+  `Z = 2000 R^2`, melted rate, that sets a snowfall's level —
+  `reflectivity_dbz`.
 
 **Radar meteorology**
 
@@ -611,8 +702,10 @@ because it is a modelling choice rather than a result.
   and the bright band.
 * L. J. Battan, *Radar Observation of the Atmosphere*, University of Chicago
   Press, 1973. The dielectric factor `|K|²` of ice against water, 0.208 against
-  0.93, which is the 6.5 dB that dry snow is down on the same rate of rain —
-  `snow_relative_db`.
+  0.93. An earlier version charged dry snow that 6.5 dB on top of the rain Z-R
+  relation; it is already inside the measured snow relation above, which is why
+  that version had snow 14 dB weaker than it is. The bright band is taken as
+  7 dB over the dry snow above it, from Doviak and Zrnić.
 
 **The Moon**
 
@@ -631,8 +724,16 @@ because it is a modelling choice rather than a result.
 
 * K. Davies, *Ionospheric Radio*, Peter Peregrinus / IEE, 1990. Doppler from a
   reflecting layer that is moving, `f = 2 (dh/dt) sin(elevation) / lambda`, and
-  the interference between modes that arrive by different paths -- the whole of
-  `morsefun/skywave.py`.
+  the interference between modes that arrive by different paths -- the low-band
+  half of `morsefun/skywave.py`.
+* C. C. Watterson, J. R. Juroshek and W. D. Bensema, "Experimental confirmation
+  of an HF channel model", *IEEE Transactions on Communication Technology*,
+  vol. 18, no. 6, pp. 792–803, 1970. Each HF mode as a Gaussian-spread Rayleigh
+  process -- `iono_components`.
+* Recommendation ITU-R F.1487, *Testing of HF modems with bandwidths of up to
+  about 12 kHz using ionospheric channel simulators*, ITU, 2000. The Doppler
+  spreads a path is given -- 0.1 Hz good, 0.5 Hz moderate, 1 Hz poor -- which is
+  the range `HF_CHURN_RANGE` is chosen to cover at a typical take-off angle.
 
 **QRSS**
 
@@ -666,7 +767,8 @@ because it is a modelling choice rather than a result.
 * S. O. Rice, "Statistical properties of a sine wave plus random noise", *Bell
   System Technical Journal*, vol. 27, no. 1, pp. 109–157, 1948. The Rician
   mixture of a steady path with a scattered one — `--rician`,
-  `rician_weights`.
+  `rician_weights` — and the level-crossing rate behind "fades about every
+  N s" in the HF report.
 
 **Signal processing**
 
@@ -733,9 +835,12 @@ being drawn in time.
 The same goes for the slow modes. The libration rates are drawn from 0.2 to
 8 degrees a day because that is the range operators talk about, not from an
 ephemeris. The Faraday depth is a rule, 22 dB at 144 MHz falling as `1/f^2`, not
-a TEC model. A skywave mode is rendered as one carrier with a slowly wandering
-frequency rather than as a diffuse band, which is right for a specular reflection
-and wrong in detail. And the QRSS arithmetic uses the conventional rule of thumb
+a TEC model. A low-band skywave mode is rendered as one carrier with a slowly
+wandering frequency rather than as a diffuse band, which is right for a specular
+reflection and wrong in detail, and the line between that and the diffuse HF
+channel is drawn at 1.5 MHz because it has to be drawn somewhere. The AGC's
+2 ms attack and 120 ms release are a CW operator's fast setting, not a
+measurement of any rig. And the QRSS arithmetic uses the conventional rule of thumb
 that a dit of `T` seconds is read in a bin of `1/T` Hz, with the smearing penalty
 taken as `10 log10(spread / bin)` -- near enough for a report, and not a detection
 theory.
@@ -748,22 +853,22 @@ morsefun/synth.py     timeline -> keyed tone, with drift, fading and hum
 morsefun/noise.py     noise floor, static crashes, QRM stations, heterodynes
 morsefun/propagation.py  bands, drop and flake distributions, Doppler, ITU-R attenuation
 morsefun/cell.py      the cell: cores, bistatic geometry, and how it all evolves
-morsefun/skywave.py   a low band: coherent hops off a layer that moves
+morsefun/skywave.py   skywave: coherent hops on a low band, Rayleigh flutter on HF
 morsefun/moon.py      EME: libration, the 2.5 second delay, Doppler, Faraday
 morsefun/aircraft.py  aircraft scatter: one reflector, moving, sliding
 morsefun/scatter.py   the Rayleigh scatter channel, fixed or changing as you listen
-morsefun/dsp.py       FFT bandpass, slow random modulation, soft limiter
+morsefun/dsp.py       FFT bandpass, slow random modulation, the AGC
 morsefun/render.py    the whole chain, levels and the S/N scaling
 morsefun/play.py      hands the samples to the system's audio player
-morsefun/profiles.py  named band conditions
+morsefun/profiles.py  named band conditions, as ranges drawn once per render
 morsefun/cli.py       argument parsing, batch mode, the report
 morsefun/wav.py       16-bit mono PCM in and out, and in memory
 morsefun/web.py       the browser front end: render, WAV, spectrogram, report
 morsefun/page.html    that front end's one page
-tests/                timing, S/N accuracy, filtering, determinism, playback, CLI
+tests/                timing, S/N accuracy, the AGC, determinism, playback, CLI, a contest
                       propagation: Doppler, ITU attenuation, Rayleigh statistics
                       cell: bistatic geometry, the draw, the evolving channel
-                      slow: QRSS bins and gain, skywave modes, the lunar echo
+                      slow: QRSS bins and gain, skywave modes, HF fading, the lunar echo
                       aircraft: the slide, the pass, the swept channel
                       web: what the page is told, and what it sends back
 ```

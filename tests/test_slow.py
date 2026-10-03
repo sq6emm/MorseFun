@@ -20,7 +20,8 @@ from morsefun.propagation import parse_band
 from morsefun.render import (MAX_SAMPLES, Config, apply_qrss, mode_name, qrss_label,
                              render)
 from morsefun.scatter import Carrier, block_size, coherent_channel
-from morsefun.skywave import draw_iono, iono_carriers
+from morsefun.skywave import (DIFFUSE_ABOVE_HZ, draw_iono, iono_carriers,
+                              iono_components)
 
 TWO_METRES = parse_band("144M")
 TWENTY_THREE_CM = parse_band("1296")
@@ -134,6 +135,56 @@ class TestSkywave(unittest.TestCase):
         self.assertLess(scatter["spread_hz"], qrss["bandwidth_hz"])
         self.assertFalse(qrss["smeared"])
         self.assertTrue(np.isfinite(out.samples).all())
+
+
+class TestHF(unittest.TestCase):
+    """HF is a diffuse channel: Rayleigh flutter a few tenths of a Hz wide."""
+
+    def test_hf_is_diffuse_and_a_low_band_is_not(self):
+        self.assertTrue(draw_iono(np.random.default_rng(1), parse_band("7.03M")).diffuse)
+        self.assertTrue(draw_iono(np.random.default_rng(1), TOP_BAND).diffuse)
+        self.assertFalse(draw_iono(np.random.default_rng(1), LF).diffuse)
+        self.assertFalse(draw_iono(np.random.default_rng(1), parse_band("474k")).diffuse)
+        self.assertLess(parse_band("474k").hz, DIFFUSE_ABOVE_HZ)
+
+    def test_the_spread_is_what_hf_simulators_use(self):
+        # ITU-R F.1487 / CCIR 520: 0.1 Hz good, 0.5 moderate, 1 Hz poor.
+        spreads = []
+        for seed in range(60):
+            rng = np.random.default_rng(seed)
+            spec = draw_iono(rng, parse_band("7.03M"))
+            spreads.append(iono_components(spec, parse_band("7.03M"), rng)[1]["spread_hz"])
+        spreads = np.array(spreads)
+        self.assertGreater(np.median(spreads), 0.08)
+        self.assertLess(np.median(spreads), 1.5)
+        self.assertGreater(np.percentile(spreads, 90), 0.4)
+
+    def test_a_40m_signal_fades_within_a_message(self):
+        # Before: coherent carriers milliHertz apart, a fade every 5 to 40 minutes
+        # and a flat envelope across a 7 s message.
+        for seed in (1, 2, 3):
+            out = render("tttttttttttttttt", Config(
+                scatter="iono", band="7.03M", wpm=20, snr_db=None, qsb_db=0.0,
+                drift_hz=0.0, iono_modes=3, layer_turbulence_mps=8.0, takeoff_deg=40.0,
+                seed=seed))                 # a moderate path: about 0.25 Hz of spread
+            self.assertTrue(out.meta["scatter"]["diffuse"])
+            spectrum = np.fft.fft(out.samples)
+            freqs = np.fft.fftfreq(out.samples.size, 1.0 / out.sample_rate)
+            spectrum[(freqs < 200) | (freqs > 1000)] = 0
+            envelope = np.abs(np.fft.ifft(2 * spectrum))
+            key_down = envelope > 0.05 * envelope.max()
+            smooth = np.convolve(envelope[key_down], np.ones(2205) / 2205, mode="valid")
+            swing = 20 * np.log10(smooth.max() / max(smooth.min(), 1e-9))
+            self.assertGreater(swing, 6.0, f"seed {seed}: only {swing:.1f} dB of fading")
+
+    def test_the_report_knows_it_is_hf(self):
+        out = render("cq test", Config(scatter="iono", band="14.03M", seed=5))
+        scatter = out.meta["scatter"]
+        self.assertTrue(scatter["diffuse"])
+        self.assertGreater(scatter["fades_per_s"], 0.0)
+        self.assertIn(scatter["sounds_like"].split(",")[0].split(":")[0],
+                      ("steady", "fading every second or two", "fluttery", "auroral flutter"))
+        self.assertGreater(scatter["audible_fraction"], 0.95)
 
 
 class TestMoon(unittest.TestCase):

@@ -16,6 +16,7 @@ __all__ = [
     "bandpass",
     "smooth_noise",
     "soft_limit",
+    "agc",
 ]
 
 
@@ -99,9 +100,68 @@ def smooth_noise(n: int, sample_rate: int, rate_hz: float, rng: np.random.Genera
 
 
 def soft_limit(x: np.ndarray, knee: float = 0.72) -> np.ndarray:
-    """Tanh limiter, the way a receiver's AGC rounds off static crashes.
+    """Tanh limiter: a waveshaper, kept only as a last-resort peak catcher.
 
-    Signals below ``knee`` pass almost untouched; peaks above it compress
-    instead of clipping square.
+    It bends the waveform, so it puts harmonics and splatter outside the IF
+    filter, which no receiver does.  :func:`agc` is what the render uses.
     """
     return np.tanh(x / knee) * knee
+
+
+def _decaying_max(x: np.ndarray, release_samples: float) -> np.ndarray:
+    """``y[n] = max(x[n], r * y[n-1])``: a peak detector with an exponential release.
+
+    Done a block at a time with a cumulative maximum in a scaled domain, so a
+    QRSS render of a few million samples does not need a Python loop over them.
+    """
+    r = float(np.exp(-1.0 / max(release_samples, 1.0)))
+    out = np.empty_like(x)
+    state = 0.0
+    block = 32768
+    for start in range(0, x.size, block):
+        seg = x[start:start + block]
+        k = np.arange(seg.size, dtype=np.float64)
+        grow = r ** (-k)                       # at most exp(block / release)
+        y = (r ** k) * np.maximum.accumulate(seg * grow)
+        y = np.maximum(y, state * r ** (k + 1.0))
+        out[start:start + block] = y
+        state = float(y[-1])
+    return out
+
+
+def _forward_max(x: np.ndarray, span: int) -> np.ndarray:
+    """``max(x[n .. n+span])``: what is about to arrive, for a look-ahead."""
+    out = x.copy()
+    step = 1
+    while step < span:
+        shifted = np.empty_like(out)
+        shifted[:-step] = out[step:]
+        shifted[-step:] = out[-1]
+        out = np.maximum(out, shifted)
+        step *= 2
+    return out
+
+
+def agc(x: np.ndarray, sample_rate: int, knee: float = 0.72,
+        attack_ms: float = 2.0, release_ms: float = 120.0) -> np.ndarray:
+    """A receiver's AGC: gain that drops fast on a crash and recovers slowly.
+
+    Below ``knee`` nothing happens.  A peak above it pulls the gain down over
+    ``attack_ms`` (with that much look-ahead, so the first cycle of a crash does
+    not get through) and the gain comes back over ``release_ms``, the fast
+    setting a CW operator uses -- which is the familiar pumping, the noise floor
+    sagging after each crash and climbing back within a dit or two.  Because it is a slowly varying *gain* and not a bend in the
+    waveform, it creates nothing outside the filter the way a limiter does.
+    """
+    if x.size == 0:
+        return x
+    attack = max(int(attack_ms * sample_rate / 1000.0), 1)
+    envelope = _decaying_max(np.abs(x), release_ms * sample_rate / 1000.0)
+    envelope = _forward_max(envelope, attack)
+    gain = knee / np.maximum(envelope, knee)
+    # Ease the gain over the attack time instead of stepping it.
+    taps = 2 * attack + 1
+    padded = np.concatenate([np.full(attack, gain[0]), gain, np.full(attack, gain[-1])])
+    cumulative = np.concatenate([[0.0], np.cumsum(padded)])
+    gain = (cumulative[taps:] - cumulative[:-taps]) / taps
+    return x * gain

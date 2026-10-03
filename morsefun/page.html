@@ -154,9 +154,14 @@
         <div><label for="qrn">QRN /s</label><input id="qrn" name="qrn" type="number" min="0" max="12" step="0.1" placeholder="profile"></div>
       </div>
       <div class="row three">
-        <div><label for="qrm">QRM</label><input id="qrm" name="qrm" type="number" min="0" max="5" step="1" placeholder="profile"></div>
+        <div><label for="qrm">QRM</label><input id="qrm" name="qrm" type="number" min="0" max="12" step="1" placeholder="profile"></div>
         <div><label for="qsb">QSB dB</label><input id="qsb" name="qsb" type="number" min="0" max="30" step="1" placeholder="profile"></div>
         <div><label for="drift">drift Hz</label><input id="drift" name="drift" type="number" min="0" max="20" step="0.1" placeholder="profile"></div>
+      </div>
+      <div class="row three">
+        <div><label for="qrm_style">they send</label><select id="qrm_style" name="qrm_style"></select></div>
+        <div><label for="qrn_db">QRN dB</label><input id="qrn_db" name="qrn_db" type="number" min="0" max="40" step="1" placeholder="profile"></div>
+        <div><label for="tilt">tilt</label><input id="tilt" name="tilt" type="number" min="0" max="1.5" step="0.1" placeholder="profile"></div>
       </div>
       <div class="row three">
         <div><label for="birdies">birdies</label><input id="birdies" name="birdies" type="number" min="0" max="4" step="1" placeholder="profile"></div>
@@ -172,8 +177,10 @@
       <button type="button" id="clear">Clear the knobs</button>
     </div>
     <p class="hint">Ctrl+Enter sends. Every blank control follows the profile, and
-    the profile draws what it does not pin, so <em>another one like it</em> is a
-    different cloud, cell or moonrise with the same settings. A seed brings one back.</p>
+    the profile draws what it does not pin &mdash; a placeholder like <em>6&ndash;14</em>
+    is a range drawn afresh each time &mdash; so <em>another one like it</em> is a
+    different evening on the band and a different cloud, cell or moonrise with the
+    same settings. A seed brings one back.</p>
   </form>
 
   <section class="panel">
@@ -212,6 +219,7 @@ async function boot() {
   fill(document.getElementById('scatter'), ['as the profile', ...options.scatter], 'as the profile');
   fill(document.getElementById('cell'), ['auto', ...options.characters.filter(c => c !== 'auto')], 'auto');
   fill(document.getElementById('qrss'), ['off', ...options.qrss.map(String)], 'off');
+  fill(document.getElementById('qrm_style'), ['as the profile', ...options.qrm_style], 'as the profile');
 
   const bands = document.getElementById('bands');
   groups.forEach((group, index) => {

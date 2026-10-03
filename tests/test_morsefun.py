@@ -12,8 +12,8 @@ import numpy as np
 from morsefun import Config, Timing, parse, render, timeline, to_code
 from morsefun.cli import main
 from morsefun.play import describe_players
-from morsefun.profiles import DESCRIPTIONS, GROUPS, PROFILES
-from morsefun.dsp import rms
+from morsefun.profiles import DESCRIPTIONS, GROUPS, PROFILES, Draw, resolve
+from morsefun.dsp import agc, rms
 from morsefun.morse import duration
 from morsefun.wav import read_wav
 
@@ -122,6 +122,23 @@ class TestRender(unittest.TestCase):
         out = render("cq de sq6emm", Config(qrm_count=2, seed=5))
         self.assertEqual(len(out.meta["noise"]["qrm"]), 2)
 
+    def test_a_contest_is_a_wall_of_stations_that_keep_sending(self):
+        out = render("tu 5nn 15", Config(scatter="iono", band="7.02M", wpm=30,
+                                          qrm_count=8, qrm_style="contest",
+                                          qrm_wpm=(26.0, 40.0), snr_db=10.0, seed=4))
+        notes = out.meta["noise"]["qrm"]
+        self.assertEqual(len(notes), 8)
+        texts = [note.split('"')[1] for note in notes]
+        self.assertTrue(any("5nn" in t or "test" in t or "599" in t for t in texts))
+        self.assertFalse(any("fb om" in t or "hw?" in t for t in texts))
+        # A pile-up sits close to the frequency: somebody within 50 Hz of us.
+        offsets = [abs(float(note.split(" at ")[1].split(" Hz")[0])) for note in notes]
+        self.assertLess(min(offsets), 50.0)
+        # And the band is busy right to the end of the render, not just at the start.
+        head = int(2.0 * out.sample_rate)
+        tail = out.samples[-head:]
+        self.assertGreater(rms(tail), 0.3 * rms(out.samples[head:2 * head]))
+
     def test_empty_text_renders_nothing_keyed(self):
         out = render("   ", Config(seed=1))
         self.assertEqual(out.meta["characters"], 0)
@@ -225,11 +242,57 @@ class TestProfiles(unittest.TestCase):
         for name in PROFILES:
             self.assertTrue(DESCRIPTIONS.get(name), f"{name} has no description")
             cfg = Config(seed=3)
-            for field, value in PROFILES[name].items():
+            for field, value in resolve(name, np.random.default_rng(3)).items():
                 setattr(cfg, field, value)
             out = render("e", cfg)          # one dit: enough to prove it works
             self.assertTrue(np.isfinite(out.samples).all(), name)
             self.assertGreater(out.samples.size, 0, name)
+
+    def test_a_profile_is_a_different_evening_every_time(self):
+        a = resolve("typical", np.random.default_rng(1))
+        b = resolve("typical", np.random.default_rng(2))
+        self.assertNotAlmostEqual(a["snr_db"], b["snr_db"], places=3)
+        lo, hi = PROFILES["typical"]["snr_db"].lo, PROFILES["typical"]["snr_db"].hi
+        for _ in range(50):
+            drawn = resolve("typical", np.random.default_rng())["snr_db"]
+            self.assertTrue(lo <= drawn <= hi)
+        # No rng: the middle of each range, which is what a form shows.
+        self.assertAlmostEqual(resolve("typical")["snr_db"], (lo + hi) / 2)
+        self.assertEqual(Draw(0, 2, integer=True).pick(None), 1)
+        self.assertEqual(str(Draw(6.0, 14.0)), "6\u201314")
+
+    def test_lightning_does_not_reach_vhf_or_microwave(self):
+        from morsefun.propagation import parse_band
+        for name, values in PROFILES.items():
+            band = values.get("band")
+            if band and parse_band(band).hz >= 50e6:
+                self.assertEqual(values.get("crash_rate"), 0.0, name)
+                self.assertEqual(values.get("tilt"), 0.0, name)
+
+
+class TestReceiver(unittest.TestCase):
+    def harmonic_db(self, cfg: Config) -> float:
+        """Third harmonic of the 600 Hz note against the note itself, dB."""
+        out = render("cq cq de sq6emm sq6emm k", cfg)
+        power = np.abs(np.fft.rfft(out.samples)) ** 2
+        freqs = np.fft.rfftfreq(out.samples.size, 1.0 / out.sample_rate)
+        band = lambda lo, hi: power[(freqs >= lo) & (freqs < hi)].sum()
+        return 10 * np.log10(band(1700, 1900) / band(550, 650))
+
+    def test_the_agc_puts_nothing_outside_the_filter(self):
+        # A tanh limiter bent the waveform and left the third harmonic 29 dB
+        # down at 1800 Hz, outside any CW filter.  An AGC changes gain, not shape.
+        self.assertLess(self.harmonic_db(Config(snr_db=10.0, seed=23)), -55.0)
+
+    def test_the_agc_catches_a_crash_and_lets_the_signal_through(self):
+        x = 0.5 * np.sin(2 * np.pi * 600 * np.arange(44100) / 44100)
+        x[20000:20400] += 6.0 * np.random.default_rng(1).standard_normal(400)
+        y = agc(x, 44100)
+        self.assertLess(float(np.abs(y[20000:20400]).max()), 1.2)      # rounded off
+        np.testing.assert_allclose(y[:19000], x[:19000])                # untouched
+        # ...and the gain comes back over a few hundred ms, not instantly.
+        self.assertLess(float(np.abs(y[21000:22000]).max()), 0.5)
+        self.assertGreater(float(np.abs(y[40000:44100]).max()), 0.45)
 
 
 if __name__ == "__main__":

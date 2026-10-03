@@ -117,26 +117,31 @@ def rain_attenuation_db_km(rate_mm_h: float, band: Band) -> float:
     return k * rate_mm_h**alpha
 
 
-def reflectivity_dbz(rate_mm_h: float) -> float:
-    """Marshall-Palmer Z-R: Z = 200 R^1.6, in dBZ.
+def reflectivity_dbz(rate_mm_h: float, kind: str = "rain", wet: bool = False) -> float:
+    """Equivalent reflectivity in dBZ for a precipitation rate.
+
+    Rain follows Marshall-Palmer, ``Z = 200 R^1.6``.  Snow follows the aggregate
+    relation of Gunn and Marshall, ``Z = 2000 R^2`` with ``R`` the melted rate:
+    for the same water a snowfall is made of far bigger, slower particles, so
+    its *equivalent* reflectivity is higher than rain's, not lower -- the ice
+    dielectric factor is already inside that measured relation.  Snow scatter
+    is weak in practice because snowfall rates are low, half a millimetre to a
+    couple an hour melted, not because a flake scatters badly.  The melting
+    layer is the bright band, 5 to 10 dB above the snow feeding it.
 
     Received power off a scattering volume follows its reflectivity, so the
-    difference between two of these is the difference in signal strength:
-    heavy rain is loud, dry snow is nearly nothing.
+    difference between two of these is the difference in signal strength.
     """
     if rate_mm_h <= 0:
         return float("-inf")
+    if str(kind).lower() == "snow":
+        dbz = 10.0 * np.log10(2000.0 * rate_mm_h**2.0)
+        return float(dbz + (BRIGHT_BAND_DB if wet else 0.0))
     return float(10.0 * np.log10(200.0 * rate_mm_h**1.6))
 
 
-def snow_relative_db(wet: bool) -> float:
-    """What snow is worth against the same rate of rain.
-
-    Dry snowflakes are poor scatterers -- the ice dielectric factor alone costs
-    about 6.5 dB -- while wet ones in the melting layer, water-coated and
-    still flake-sized, are brighter than the equivalent rain: the bright band.
-    """
-    return 3.0 if wet else -6.5
+#: The melting layer against the dry snow above it, dB (Doviak and Zrnic).
+BRIGHT_BAND_DB = 7.0
 
 
 def drop_diameters(rate_mm_h: float, count: int, rng: np.random.Generator) -> np.ndarray:

@@ -17,8 +17,8 @@ from morsefun.cell import (Cell, Core, Geometry, cell_doppler, character_from_ra
                            character_name, draw_cell, evolution, parse_character,
                            sounds_like)
 from morsefun.propagation import parse_band
-from morsefun.scatter import (EvolvingSpectrum, block_size, evolving_channel,
-                              frame_count)
+from morsefun.scatter import (Component, EvolvingSpectrum, block_size,
+                              evolving_channel, frame_count)
 
 X_BAND = parse_band("10G")
 TWENTY_THREE_CM = parse_band("1296")
@@ -255,6 +255,43 @@ class TestEvolvingChannel(unittest.TestCase):
         self.assertGreater(alive, still)
 
 
+class TestRetune(unittest.TestCase):
+    def test_retune_moves_the_synthesised_spectrum(self):
+        rng = np.random.default_rng(0)
+        component = Component(freqs=rng.normal(100.0, 5.0, 3000),
+                              weights=np.full(3000, 1 / 3000), centre_hz=100.0)
+        spectrum = EvolvingSpectrum([component], smooth_hz=2.0)
+        spectrum.retune(-100.0)
+        psd = spectrum.psd(0)
+        self.assertGreater(psd.sum(), 0.0)                       # nothing dropped
+        self.assertAlmostEqual(float(spectrum.grid[np.argmax(psd)]), 0.0, delta=3.0)
+        process = evolving_channel(200_000, 44100, spectrum, 600.0,
+                                   np.random.default_rng(1), 8192)
+        power = np.abs(np.fft.fft(process)) ** 2
+        freqs = np.fft.fftfreq(process.size, 1.0 / 44100)
+        self.assertAlmostEqual(float(np.sum(freqs * power) / power.sum()), 0.0, delta=3.0)
+
+    def test_the_rain_scattered_note_comes_back_on_the_tone(self):
+        # The report said the return had been tuned back onto the note while the
+        # audio sat tens of Hz away with part of its spectrum thrown away.
+        cfg = Config(scatter="rain", snr_db=None, qsb_db=0.0, drift_hz=0.0,
+                     scintillation_db=0.0, seed=4)
+        out = render("tttttttt", cfg)
+        scatter = out.meta["scatter"]
+        self.assertGreater(abs(scatter["tuned_out_hz"]), 30.0)   # a shift worth tuning out
+        power = np.abs(np.fft.rfft(out.samples)) ** 2
+        freqs = np.fft.rfftfreq(out.samples.size, 1.0 / out.sample_rate)
+        keep = (freqs > 200) & (freqs < 1000)
+        centroid = float(np.sum(freqs[keep] * power[keep]) / power[keep].sum())
+        self.assertAlmostEqual(centroid, 600.0, delta=8.0)
+        raw = render("tttttttt", Config(scatter="rain", snr_db=None, qsb_db=0.0,
+                                        drift_hz=0.0, scintillation_db=0.0,
+                                        retune=False, seed=4))
+        power = np.abs(np.fft.rfft(raw.samples)) ** 2
+        centroid = float(np.sum(freqs[keep] * power[keep]) / power[keep].sum())
+        self.assertAlmostEqual(centroid - 600.0, scatter["tuned_out_hz"], delta=10.0)
+
+
 class TestRenderWithScatter(unittest.TestCase):
     def test_scatter_broadens_the_note(self):
         # The keying itself is worth about 16 Hz of sidebands, so that is the
@@ -278,9 +315,11 @@ class TestRenderWithScatter(unittest.TestCase):
         heavy = render("cq test", Config(scatter="rain", rain_rate=50, seed=9))
         self.assertLess(light.meta["effective_snr_db"],
                         heavy.meta["effective_snr_db"] - 15)
-        dry = render("cq test", Config(scatter="snow", snow_rate=4, seed=9))
-        wet = render("cq test", Config(scatter="snow", snow_rate=4, snow_wet=True, seed=9))
+        dry = render("cq test", Config(scatter="snow", snow_rate=1, seed=9))
+        wet = render("cq test", Config(scatter="snow", snow_rate=1, snow_wet=True, seed=9))
         self.assertLess(dry.meta["effective_snr_db"], wet.meta["effective_snr_db"] - 5)
+        # A millimetre an hour of snow is several dB down on 12 mm/h of rain.
+        self.assertLess(dry.meta["scatter"]["level_offset_db"], -4.0)
 
     def test_weather_level_can_be_turned_off(self):
         out = render("cq test", Config(scatter="rain", rain_rate=50,

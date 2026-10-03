@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .dsp import band_response, bandpass, db_to_amp, rms, smooth_noise
-from .morse import Timing, parse, timeline
+from .morse import Element, Timing, parse, timeline
 from .synth import ToneSpec, keyed_tone, keying_envelope
 
 CALL_PREFIXES = (
@@ -37,7 +37,34 @@ QRM_PATTERNS = (
     "qrl? de {call}",
     "de {call} tu 73 <SK>",
     "{other} de {call} ok fb om",
+    "r r {other} de {call} gm es tnx fer call <BT> ur rst 559 559",
+    "{other} de {call} qth near {qth} {qth} <BT> name {name} {name} <AR>",
+    "cq dx cq dx de {call} {call} {call} k",
 )
+
+#: A contest weekend: exchanges, serials, zones, pile-ups and nobody chatting.
+CONTEST_PATTERNS = (
+    "cq test {call} {call} test",
+    "test {call} {call}",
+    "{other} 5nn {zone}",
+    "{other} tu 5nn {zone} {zone}",
+    "{call} 599 {zone} tu",
+    "{other} r 5nn {nr} {nr}",
+    "tu {call} test",
+    "nr {nr} {nr} tu",
+    "{other} {other} de {call} 5nn {nr} k",
+    "agn agn",
+    "qrz? {call} test",
+    "{other} ur 5nn {nr} bk",
+    "{other} de {call} {call}",
+    "cq cq test de {call} {call} test",
+)
+
+QTH_NAMES = ("berlin", "wroclaw", "oslo", "bath", "lyon", "praha", "pisa", "gent")
+OP_NAMES = ("jan", "tom", "ole", "ian", "max", "uli", "jim", "rob", "leo")
+
+#: How long a station listens between transmissions, seconds.
+PAUSE_S = {"ragchew": (1.0, 5.0), "contest": (0.3, 1.8)}
 
 
 @dataclass
@@ -53,6 +80,7 @@ class NoiseSpec:
     qrm_count: int = 1           # other CW stations in the pass band
     qrm_db: tuple[float, float] = (-6.0, 8.0)  # their level above the floor, dB
     qrm_wpm: tuple[float, float] = (14.0, 32.0)
+    qrm_style: str = "ragchew"   # ragchew | contest | mixed: what they are sending
     birdie_count: int = 0        # drifting carriers
     birdie_db: float = 4.0
 
@@ -107,11 +135,53 @@ def random_call(rng: np.random.Generator) -> str:
     return prefix + digit + letters
 
 
+def station_text(style: str, call: str, rng: np.random.Generator) -> str:
+    """One transmission from a station working in ``style``."""
+    contest = style == "contest" or (style == "mixed" and rng.random() < 0.5)
+    pattern = str(rng.choice(CONTEST_PATTERNS if contest else QRM_PATTERNS))
+    return pattern.format(
+        call=call, other=random_call(rng),
+        nr=int(rng.integers(1, 1500)), zone=int(rng.integers(1, 41)),
+        qth=str(rng.choice(QTH_NAMES)), name=str(rng.choice(OP_NAMES)))
+
+
+def station_timeline(style: str, call: str, wpm: float, seconds: float,
+                     rng: np.random.Generator) -> tuple[list, str]:
+    """Everything one station sends in ``seconds``: it keeps going, with pauses.
+
+    A station that is on the band stays on it -- calls, listens, calls again --
+    so the timeline is transmission, pause, transmission until the render is
+    full, each transmission freshly drawn.  Returns the elements and the first
+    text, for the report.
+    """
+    lo, hi = PAUSE_S["contest" if style == "contest" else "ragchew"]
+    timing = Timing(wpm)
+    elements: list[Element] = []
+    first = ""
+    total = 0.0
+    while total < seconds:
+        text = station_text(style, call, rng)
+        first = first or text
+        words, _ = parse(text)
+        part = timeline(words, timing)
+        elements.extend(part)
+        pause = float(rng.uniform(lo, hi))
+        elements.append(Element(False, pause, "word-gap"))
+        total += sum(e.seconds for e in part) + pause
+    return elements, first
+
+
 def qrm(
     n: int, sample_rate: int, center: float, spec: NoiseSpec, rng: np.random.Generator,
     scatter=None,
 ) -> tuple[np.ndarray, list[str]]:
     """Other stations working through the pass band.
+
+    Each one has its own callsign, speed, tone, level and fading, keeps sending
+    for the whole render with listening gaps between overs, and starts wherever
+    it was when you tuned in.  In ``contest`` style the exchanges are serials
+    and zones at 26 to 40 wpm and the stations sit close to the frequency,
+    because that is what a pile-up is.
 
     ``scatter``, if given, is called with ``(envelope, tone, rng)`` and returns
     the station already scattered off its own cell plus a note about it.  On a
@@ -122,15 +192,20 @@ def qrm(
     """
     out = np.zeros(n)
     notes: list[str] = []
+    seconds = n / sample_rate
+    contest = spec.qrm_style == "contest"
     for _ in range(max(0, spec.qrm_count)):
         call = random_call(rng)
-        text = str(rng.choice(QRM_PATTERNS)).format(call=call, other=random_call(rng))
         wpm = float(rng.uniform(*spec.qrm_wpm))
         level_db = float(rng.uniform(*spec.qrm_db))
-        # Sit somewhere in or just outside the pass band, never right on top of us.
-        offset = float(rng.uniform(0.18, 0.75) * spec.bandwidth) * (1 if rng.random() < 0.5 else -1)
-        words, _ = parse(text)
-        elements = timeline(words, Timing(wpm))
+        # Sit somewhere in the pass band.  Ragchewers keep their distance; a
+        # pile-up sits right on top of you.
+        nearest = 0.03 if contest else 0.18
+        offset = (float(rng.uniform(nearest, 0.75) * spec.bandwidth)
+                  * (1 if rng.random() < 0.5 else -1))
+        start = float(rng.uniform(-0.6, 0.5)) * seconds
+        elements, text = station_timeline(spec.qrm_style, call, wpm,
+                                          seconds - min(start, 0.0), rng)
         station = ToneSpec(
             freq=max(80.0, center + offset),
             rise_ms=float(rng.uniform(3.0, 9.0)),
@@ -140,8 +215,8 @@ def qrm(
             qsb_db=0.0 if scatter else float(rng.uniform(2.0, 14.0)),
             qsb_rate=float(rng.uniform(0.1, 0.5)),
         )
-        start = float(rng.uniform(-0.5, 1.0)) * n / sample_rate
-        note = f"{call} at {station.freq - center:+.0f} Hz, {wpm:.0f} wpm, {level_db:+.0f} dB"
+        note = (f"{call} at {station.freq - center:+.0f} Hz, {wpm:.0f} wpm, "
+                f"{level_db:+.0f} dB: \"{text}\"")
         if scatter is None:
             audio, _ = keyed_tone(elements, sample_rate, station, rng, length=n, offset=start)
         else:

@@ -312,9 +312,16 @@ class EvolvingSpectrum:
         return mean, spread
 
     def retune(self, hz: float) -> None:
-        """Tune the whole return by ``hz``, the way an operator would."""
+        """Tune the whole return by ``hz``, the way an operator would.
+
+        Only the grid's labels move.  The histogram range has to stay where the
+        scatterers actually are: shifting it too would put every sample back in
+        a bin with the same new label, so nothing would move -- and anything
+        pushed past the end of the range would be dropped on the floor, which
+        is how a tuned-in storm once came out as a fragment of one core at the
+        wrong pitch.
+        """
         self.grid = self.grid + float(hz)
-        self._range = (self._range[0] + float(hz), self._range[1] + float(hz))
 
 
 def block_size(spread_hz: float, sample_rate: int, n: int,
