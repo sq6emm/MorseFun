@@ -9,6 +9,7 @@ the ARRL formula, so each character still arrives at full speed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 MORSE: dict[str, str] = {
@@ -29,13 +30,48 @@ MORSE: dict[str, str] = {
 #: character: <AR> end of message, <SK> end of contact, <BT> break, and so on.
 PROSIGN_HINT = "<AR> <SK> <BT> <AS> <KN> <VE>"
 
+#: A hold is written in square brackets: ``[30s]`` is the key held down for
+#: thirty seconds, the long carrier a beacon sends after its identification;
+#: ``[2s pause]`` is the key left up for two seconds.
+HOLD_HINT = "[30s] [500ms] [2s pause]"
+
+_HOLD = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*(ms|s|sec|m|min)"
+    r"(?:\s+(carrier|dash|key|down|off|pause|gap|silence|quiet))?\s*$")
+_UNITS = {"ms": 0.001, "s": 1.0, "sec": 1.0, "m": 60.0, "min": 60.0}
+_QUIET = ("off", "pause", "gap", "silence", "quiet")
+
+#: Square brackets group whatever is inside them into one token, spaces and
+#: all; everything else splits on whitespace as it always did.
+_TOKENS = re.compile(r"\[[^\]]*\]|\[|[^\s\[]+")
+
 
 @dataclass(frozen=True)
 class Character:
-    """One keyed character: ``label`` as written, ``code`` in dits and dahs."""
+    """One keyed character: ``label`` as written, ``code`` in dits and dahs.
+
+    A *hold* has no code: it is the key kept down (``on``) or up for ``hold``
+    seconds, which is how a beacon's long carrier and a deliberate pause are
+    written into a message.
+    """
 
     label: str
     code: str
+    hold: float = 0.0
+    on: bool = True
+
+
+def parse_hold(inner: str) -> Character | None:
+    """``30s`` or ``2s pause`` as a :class:`Character`, or ``None``."""
+    found = _HOLD.match(inner)
+    if not found:
+        return None
+    seconds = float(found.group(1)) * _UNITS[found.group(2)]
+    if seconds <= 0:
+        return None
+    quiet = found.group(3) in _QUIET
+    label = f"[{seconds:g}s{' pause' if quiet else ''}]"
+    return Character(label, "", hold=seconds, on=not quiet)
 
 
 @dataclass(frozen=True)
@@ -97,8 +133,9 @@ def parse(text: str) -> tuple[list[list[Character]], list[str]]:
     """Split ``text`` into words of characters, plus the characters dropped.
 
     Angle brackets mark a prosign: ``<AR>`` is keyed as A and R with no gap
-    between them.  Anything with no Morse equivalent is reported instead of
-    being keyed.
+    between them.  Square brackets mark a hold: ``[30s]`` keeps the key down
+    for thirty seconds and ``[2s pause]`` keeps it up.  Anything with no Morse
+    equivalent is reported instead of being keyed.
     """
     words: list[list[Character]] = []
     unknown: list[str] = []
@@ -107,8 +144,15 @@ def parse(text: str) -> tuple[list[list[Character]], list[str]]:
         if ch.strip() and ch not in unknown:
             unknown.append(ch)
 
-    for raw in text.lower().split():
+    for raw in _TOKENS.findall(text.lower()):
         chars: list[Character] = []
+        if raw.startswith("["):
+            hold = parse_hold(raw[1:-1]) if raw.endswith("]") and len(raw) > 2 else None
+            if hold is None:
+                drop(raw)
+            else:
+                words.append([hold])
+            continue
         i = 0
         while i < len(raw):
             if raw[i] == "<":
@@ -146,6 +190,9 @@ def timeline(words: list[list[Character]], timing: Timing) -> list[Element]:
         for c, char in enumerate(chars):
             if c:
                 out.append(Element(False, timing.char_gap, "char-gap"))
+            if char.hold:
+                out.append(Element(char.on, char.hold, "carrier" if char.on else "pause"))
+                continue
             for s, symbol in enumerate(char.code):
                 if s:
                     out.append(Element(False, unit, "element-gap"))
@@ -164,5 +211,8 @@ def duration(elements: list[Element]) -> float:
 
 
 def to_code(words: list[list[Character]]) -> str:
-    """Render parsed words as dits and dahs, words split by ``/``."""
-    return "  /  ".join(" ".join(c.code for c in w) for w in words)
+    """Render parsed words as dits and dahs, words split by ``/``.
+
+    A hold has no dits and dahs, so it is shown as it was written: ``[30s]``.
+    """
+    return "  /  ".join(" ".join(c.code or c.label for c in w) for w in words)

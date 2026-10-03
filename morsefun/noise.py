@@ -5,7 +5,8 @@ through the receiver's IF filter:
 
 * an atmospheric noise floor, pink-tilted rather than flat white;
 * static crashes (QRN) arriving at random, each a decaying broadband burst;
-* other CW stations (QRM), each with its own callsign, speed, tone and fading;
+* other CW stations (QRM), each with a callsign a real licensing authority
+  could have issued, its own speed, tone and fading;
 * heterodynes, the steady drifting whistles of a carrier sitting in the pass band.
 
 The floor is normalised to unit RMS after filtering, so every other level is
@@ -22,11 +23,7 @@ import numpy as np
 from .dsp import band_response, bandpass, db_to_amp, rms, smooth_noise
 from .morse import Element, Timing, parse, timeline
 from .synth import ToneSpec, keyed_tone, keying_envelope
-
-CALL_PREFIXES = (
-    "sp", "sq", "dl", "ok", "oh", "sm", "la", "ea", "on", "pa", "yo", "yu",
-    "g", "gm", "f", "i", "ua", "ur", "lz", "s5", "9a", "k", "w", "n", "ve", "ja",
-)
+from .traffic import Station, draw_station, random_call, station_from_call
 
 #: What the neighbours are sending.  Short, like real QRM heard in passing.
 QRM_PATTERNS = (
@@ -40,6 +37,8 @@ QRM_PATTERNS = (
     "r r {other} de {call} gm es tnx fer call <BT> ur rst 559 559",
     "{other} de {call} qth near {qth} {qth} <BT> name {name} {name} <AR>",
     "cq dx cq dx de {call} {call} {call} k",
+    "{other} de {call} ur 559 559 in {loc} {loc} hw? <KN>",
+    "cq cq de {call} {call} {square} k",
 )
 
 #: A contest weekend: exchanges, serials, zones, pile-ups and nobody chatting.
@@ -59,9 +58,6 @@ CONTEST_PATTERNS = (
     "{other} de {call} {call}",
     "cq cq test de {call} {call} test",
 )
-
-QTH_NAMES = ("berlin", "wroclaw", "oslo", "bath", "lyon", "praha", "pisa", "gent")
-OP_NAMES = ("jan", "tom", "ole", "ian", "max", "uli", "jim", "rob", "leo")
 
 #: How long a station listens between transmissions, seconds.
 PAUSE_S = {"ragchew": (1.0, 5.0), "contest": (0.3, 1.8)}
@@ -127,25 +123,24 @@ def static_crashes(
     return out
 
 
-def random_call(rng: np.random.Generator) -> str:
-    """A plausible callsign: prefix, digit, one to three letters."""
-    prefix = str(rng.choice(CALL_PREFIXES))
-    digit = str(int(rng.integers(0, 10)))
-    letters = "".join(chr(int(c)) for c in rng.integers(97, 123, size=int(rng.integers(1, 4))))
-    return prefix + digit + letters
+def station_text(style: str, station: Station | str, rng: np.random.Generator) -> str:
+    """One transmission from a station working in ``style``.
 
-
-def station_text(style: str, call: str, rng: np.random.Generator) -> str:
-    """One transmission from a station working in ``style``."""
+    The station brings its own callsign, name, town and locator, all from the
+    same country, so a neighbour giving a QTH gives one its prefix allows.
+    """
+    if isinstance(station, str):
+        station = station_from_call(station, rng)
     contest = style == "contest" or (style == "mixed" and rng.random() < 0.5)
     pattern = str(rng.choice(CONTEST_PATTERNS if contest else QRM_PATTERNS))
     return pattern.format(
-        call=call, other=random_call(rng),
-        nr=int(rng.integers(1, 1500)), zone=int(rng.integers(1, 41)),
-        qth=str(rng.choice(QTH_NAMES)), name=str(rng.choice(OP_NAMES)))
+        call=station.call.lower(), other=random_call(rng),
+        nr=int(rng.integers(1, 1500)), zone=station.zone,
+        qth=station.qth or "here", name=station.name,
+        loc=station.locator.lower(), square=station.square.lower())
 
 
-def station_timeline(style: str, call: str, wpm: float, seconds: float,
+def station_timeline(style: str, station: Station | str, wpm: float, seconds: float,
                      rng: np.random.Generator) -> tuple[list, str]:
     """Everything one station sends in ``seconds``: it keeps going, with pauses.
 
@@ -160,7 +155,7 @@ def station_timeline(style: str, call: str, wpm: float, seconds: float,
     first = ""
     total = 0.0
     while total < seconds:
-        text = station_text(style, call, rng)
+        text = station_text(style, station, rng)
         first = first or text
         words, _ = parse(text)
         part = timeline(words, timing)
@@ -194,17 +189,20 @@ def qrm(
     notes: list[str] = []
     seconds = n / sample_rate
     contest = spec.qrm_style == "contest"
-    for _ in range(max(0, spec.qrm_count)):
-        call = random_call(rng)
+    for index in range(max(0, spec.qrm_count)):
+        station = draw_station(rng)
+        call = station.call.lower()
         wpm = float(rng.uniform(*spec.qrm_wpm))
         level_db = float(rng.uniform(*spec.qrm_db))
         # Sit somewhere in the pass band.  Ragchewers keep their distance; a
-        # pile-up sits right on top of you.
+        # pile-up sits right on top of you, and the first one in it always
+        # does, because a pile-up with nobody on your frequency is not one.
         nearest = 0.03 if contest else 0.18
-        offset = (float(rng.uniform(nearest, 0.75) * spec.bandwidth)
+        farthest = 0.09 if contest and index == 0 else 0.75
+        offset = (float(rng.uniform(nearest, farthest) * spec.bandwidth)
                   * (1 if rng.random() < 0.5 else -1))
         start = float(rng.uniform(-0.6, 0.5)) * seconds
-        elements, text = station_timeline(spec.qrm_style, call, wpm,
+        elements, text = station_timeline(spec.qrm_style, station, wpm,
                                           seconds - min(start, 0.0), rng)
         station = ToneSpec(
             freq=max(80.0, center + offset),

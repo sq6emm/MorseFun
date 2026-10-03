@@ -95,6 +95,50 @@ class TestPayload(unittest.TestCase):
             config_from_payload({"profile": "typical", "cell": "drizzle-ish"})
 
 
+class TestGenerated(unittest.TestCase):
+    """The page can ask for a QSO or a beacon instead of sending a text."""
+
+    def handler(self):
+        from morsefun.web import Handler, Renders
+        made = Handler.__new__(Handler)
+        made.renders = Renders()
+        return made
+
+    def test_a_qso_comes_back_as_text_with_two_stations(self):
+        body = self.handler().render({"profile": "tropo-2m", "generate": "qso",
+                                      "seed": "21", "my_call": "sq6emm", "my_loc": "jo81lc"})
+        self.assertIn("sq6emm", body["text"])
+        self.assertIn("jo81lc", body["text"])
+        self.assertTrue(body["two_stations"])
+        self.assertGreaterEqual(len(body["text"].splitlines()), 4)
+        self.assertIn("QSO", body["script"])
+        self.assertIsNotNone(body["meta"]["other_station"])
+        # The same seed draws the same QSO.
+        again = self.handler().render({"profile": "tropo-2m", "generate": "qso",
+                                       "seed": "21", "my_call": "sq6emm", "my_loc": "jo81lc"})
+        self.assertEqual(again["text"], body["text"])
+
+    def test_a_beacon_slows_down_unless_told_otherwise(self):
+        body = self.handler().render({"profile": "tropo-10g", "generate": "beacon", "seed": "3"})
+        self.assertFalse(body["two_stations"])
+        self.assertLessEqual(body["meta"]["wpm"], 15.0)
+        self.assertIn("beacon", body["script"])
+        fast = self.handler().render({"profile": "tropo-10g", "generate": "beacon",
+                                      "seed": "3", "wpm": "25"})
+        self.assertAlmostEqual(fast["meta"]["wpm"], 25.0)
+        with self.assertRaises(ValueError):
+            self.handler().render({"profile": "typical", "generate": "sermon"})
+
+    def test_two_stations_from_the_form(self):
+        cfg, _ = config_from_payload({"profile": "typical", "two_stations": "on",
+                                      "other_offset": "80", "other_db": "-3"})
+        self.assertTrue(cfg.two_stations)
+        self.assertAlmostEqual(cfg.other_offset_hz, 80.0)
+        self.assertAlmostEqual(cfg.other_db, -3.0)
+        cfg, _ = config_from_payload({"profile": "typical"})
+        self.assertFalse(cfg.two_stations)
+
+
 class TestWaterfall(unittest.TestCase):
     def test_the_window_follows_the_keying(self):
         samples = np.random.default_rng(1).standard_normal(8000 * 30)

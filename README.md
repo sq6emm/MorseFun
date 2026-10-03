@@ -4,9 +4,11 @@ Morse code generator for the bands where propagation is the loudest thing in the
 signal: type a message and hear it the way it would come back off a rain cell at
 10 GHz, off a layer on 2200 m, or off the Moon. It does 23 wpm and it does
 [QRSS](#qrss-a-dit-that-lasts-seconds), where one dit lasts three seconds and the
-message is read off a waterfall. It writes a WAV file only if you ask for one, and
-it will [serve itself as a web page](#live-in-a-browser) if you would rather turn
-the knobs in a browser.
+message is read off a waterfall. If you have nothing to say it will
+[write the message too](#something-to-copy-qsos-and-beacons): both sides of a QSO,
+or a beacon, that belongs on the band you picked. It writes a WAV file only if you
+ask for one, and it will [serve itself as a web page](#live-in-a-browser) if you
+would rather turn the knobs in a browser.
 
 ```bash
 python -m morsefun "cq cq de sq6emm sq6emm k" --wpm 23 --tone 600
@@ -58,7 +60,10 @@ that band actually offers. Each one says what it is in a line, and choosing it
 renders straight away.
 
 Then type a message, press **send it**, and the page plays what came back and
-draws the waterfall of it, with the transform length following the keying: a few
+draws the waterfall of it — or set **send** to *a QSO, both sides* or *a beacon*
+and let it draw the message for the band and path you picked; the text lands in
+the box so you can read along, and editing it switches back to sending what you
+typed. The page draws the waterfall with the transform length following the keying: a few
 hundred Hz across for 23 wpm, a few Hz across and tenths of a Hz per bin for
 QRSS, which is the only way a three-second dit is visible at all. **Another one
 like it** re-draws the path with the same settings — a different cell, moonrise
@@ -120,6 +125,95 @@ trains the sound of a character at full speed.
 
 ```bash
 python -m morsefun "sq6emm de dl1abc" --wpm 25 --effective-wpm 13
+```
+
+## Something to copy: QSOs and beacons
+
+```bash
+python -m morsefun --qso --profile 40m-dx --my-call sq6emm --my-loc jo81lc --my-name dawid
+python -m morsefun --qso --profile rain-scatter
+python -m morsefun --beacon --profile tropo-10g
+```
+
+Instead of a text, let it draw one. `--qso` writes both sides of a contact that
+belongs on the profile's band and path, `--beacon` writes what a beacon on that
+band sends, and every pass is a new one — `--seed` brings a QSO back together
+with the evening it was heard on. `--my-call` puts you in it, calling or
+answering as the draw falls; `--my-loc` says where you are if the callsign does
+not, and `--my-name` what you give on the air.
+
+```
+  text      A  cq cq de e77ib e77ib jn94 k
+            B  e77ib de om4lrf om4lrf <AR>
+            A  om4lrf de e77ib ur 57s 57s via rs in jn94ip jn94ip hw? om4lrf de e77ib <KN>
+            B  e77ib de om4lrf agn pse ur rprt agn <KN>
+            A  om4lrf de e77ib r ur 57s 57s 57s 57s in jn94ip jn94ip jn94ip k
+            B  e77ib de om4lrf r r tnx ur 57s 57s via rs jn98pq jn98pq hw? <KN>
+            A  om4lrf de e77ib rr cfm tnx fer nice qso 73 es gl om4lrf de e77ib <SK>
+            B  e77ib de om4lrf qsl tnx fer qso 73 73 <SK>
+  script    QSO E77IB (JN94IP, tuzla) with OM4LRF (JN98PQ, banska bystrica), 455 km: 8 overs, scatter, S reports
+  other     the other station -41 Hz off, 21 wpm, -2 dB, 4 overs, 1.3 s to turn round
+            its own path: hissy, the usual rain scatter note
+```
+
+**The callsigns are not random strings.** A call has a prefix that says which
+country issued it, in many countries a digit that says which district, and a
+suffix of two or three letters, and every country has its own habits — a German
+beacon is `DB0` and three letters, a British one `GB3`, an Italian one signs
+`/B`. `morsefun/traffic.py` keeps a table of fifty-odd countries with those
+habits, the towns their stations are in, and the names their operators go by,
+weighted by how often each is heard from the middle of Europe. So a station
+comes with a locator that is where its callsign says it is: `SQ6EMM` is Lower
+Silesia, so Wrocław or Opole and `JO81`; `GM4` is Scotland before it is
+England; `W1` is New England. The same table now supplies the neighbours on the
+band, so a QRM station giving its QTH gives one its prefix allows.
+
+**The other station is within reach of the path.** Rain scatter carries 60 to
+500 km, tropo 30 to 700, aircraft scatter 150 to 800, aurora works between
+northern stations 300 to 2000 km apart, HF is anywhere with Europe most likely,
+and the Moon does not care.
+
+**The procedure follows the band and the path.** On HF it is a ragchew: CQ, the
+answer, report, name and QTH, half the time the rig, power, antenna and weather
+as well, and a proper `73 <SK>`. The reports follow the conditions — `559` at
+the profile's 10 dB, `599` above 18, `wid qsb` when the fading is deep — and the
+one you are given follows the other station's level against yours. On VHF and
+up it is report and locator, each repeated, and a quarter of the time the report
+did not make it and is asked for again. Rain scatter gives `S` reports, `57s via
+rs`, aurora gives `A` reports, a contest profile gives serials or zones with cut
+numbers (`5nn tt7`), the Moon gets the EME procedure — calls, `O`, `RO`, `RRR`,
+`73`, each sent for a period — and a QRSS profile gets two overs, because at a
+three-second dit anything longer takes an afternoon.
+
+**The other station is a station.** It is rendered on its own note, 15 to 120 Hz
+either side of yours, at its own speed within a fifth of yours, a few dB up or
+down, with its own drift and fading, and down its own path — the same weather,
+the same layer, the same Moon, but a fresh draw of everything that is drawn, so
+off a rain cell it has its own spread and its own Doppler. It listens while you
+send, and an operator's pause of one to two and a half seconds sits between the
+overs. `--other-offset`, `--other-wpm`, `--other-db` and `--turnaround` pin any
+of that. `--snr` stays yours: the other station's level is relative to you, and
+the key-up gaps that count as quiet are the ones in which neither of you is
+sending.
+
+`--two-stations` does the same for a text of your own: every other line is the
+other station, the first line being yours, which is how a QSO is written down.
+
+**A beacon identifies and then holds the key down.** VHF and microwave beacons
+send callsign and locator at 10 to 15 wpm and then key a carrier for tens of
+seconds — the carrier is what the beacon is *for*, the identification only says
+whose it is — and some key the carrier first. HF beacons sign `/b` and hold for
+less; a QRSS beacon sends its callsign and perhaps a long dash. `--carrier` and
+`--no-carrier` settle it, and a beacon keeps its slow speed unless `--wpm` says
+otherwise. Short cycles are sent twice, so the shape can be heard.
+
+The hold is written into the message as `[30s]`, and you can write it into any
+message yourself: `[30s]` keeps the key down for thirty seconds, `[500ms]` for
+half a second, `[2s pause]` keeps it up. The report shows it as written, since
+there are no dits and dahs to show.
+
+```bash
+python -m morsefun "db0abc jo62qm [30s]" --wpm 12 --profile tropo-2m
 ```
 
 ## Scatter: rain, snow and aurora
@@ -549,7 +643,7 @@ through the same IF filter:
 | Noise floor | `--snr`, `--bandwidth`, `--tilt` | Gaussian noise band-limited to the filter, with a 1/f atmospheric tilt on HF and below and flat receiver noise on VHF and up |
 | Scatter | `--scatter`, see above | rain, snow, aurora, skywave, the Moon, an aeroplane |
 | Static crashes (QRN) | `--qrn`, `--qrn-db` | Poisson arrivals, log-normal strengths, each a decaying broadband burst — lightning, so an HF and LF thing: the VHF and microwave profiles have none |
-| Other stations (QRM) | `--qrm`, `--qrm-db`, `--qrm-wpm`, `--qrm-style` | Real CW: random callsigns, chat or contest exchanges, own speed, tone offset, drift and fading, calling and listening for the whole render |
+| Other stations (QRM) | `--qrm`, `--qrm-db`, `--qrm-wpm`, `--qrm-style` | Real CW: callsigns a real licensing authority could have issued, with the town and locator to match, chat or contest exchanges, own speed, tone offset, drift and fading, calling and listening for the whole render |
 | Heterodynes | `--birdies`, `--birdie-db` | A carrier that drifts slowly and never says anything |
 
 The wanted signal gets its own imperfections: a finite envelope rise and fall
@@ -661,6 +755,20 @@ cfg = apply_qrss(Config(scatter="eme", band="144M", snr_db=-6), 3.0)   # QRSS3
 result = render("vvv de sq6emm", cfg)
 print(result.meta["scatter"]["delay_s"])            # the echo, seconds late
 print(result.meta["qrss"]["waterfall_snr_db"])      # what the bin makes of it
+```
+
+A drawn QSO is the same call again, with the message written for you:
+
+```python
+import numpy as np
+from morsefun import Config, compose, render
+
+cfg = Config(band="7.03M", scatter="iono", wpm=20, seed=7)
+script = compose("qso", cfg, np.random.default_rng(7), my_call="sq6emm", my_loc="jo81lc")
+cfg.two_stations = script.two_stations
+result = render(script.text, cfg)
+print(script.note)                                  # who, where, how far, how many overs
+print(result.meta["other_station"])                 # what the other side was rendered as
 ```
 
 `render` returns the float samples plus a `meta` dict with the code, the timing,
@@ -851,6 +959,7 @@ theory.
 morsefun/morse.py     text -> characters -> key-up/key-down timeline
 morsefun/synth.py     timeline -> keyed tone, with drift, fading and hum
 morsefun/noise.py     noise floor, static crashes, QRM stations, heterodynes
+morsefun/traffic.py   who is on the air: callsigns by country, towns and locators, QSOs and beacons
 morsefun/propagation.py  bands, drop and flake distributions, Doppler, ITU-R attenuation
 morsefun/cell.py      the cell: cores, bistatic geometry, and how it all evolves
 morsefun/skywave.py   skywave: coherent hops on a low band, Rayleigh flutter on HF
@@ -858,7 +967,7 @@ morsefun/moon.py      EME: libration, the 2.5 second delay, Doppler, Faraday
 morsefun/aircraft.py  aircraft scatter: one reflector, moving, sliding
 morsefun/scatter.py   the Rayleigh scatter channel, fixed or changing as you listen
 morsefun/dsp.py       FFT bandpass, slow random modulation, the AGC
-morsefun/render.py    the whole chain, levels and the S/N scaling
+morsefun/render.py    the whole chain, levels and the S/N scaling, the other side of a QSO
 morsefun/play.py      hands the samples to the system's audio player
 morsefun/profiles.py  named band conditions, as ranges drawn once per render
 morsefun/cli.py       argument parsing, batch mode, the report
@@ -870,5 +979,6 @@ tests/                timing, S/N accuracy, the AGC, determinism, playback, CLI,
                       cell: bistatic geometry, the draw, the evolving channel
                       slow: QRSS bins and gain, skywave modes, HF fading, the lunar echo
                       aircraft: the slide, the pass, the swept channel
+                      traffic: callsigns and locators, the procedure on each band, two stations, holds
                       web: what the page is told, and what it sends back
 ```

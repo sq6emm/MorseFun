@@ -14,6 +14,7 @@ from .cell import parse_character
 from .play import PlaybackError, describe_players, find_player, play
 from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, GROUPS, PROFILES, resolve
 from .render import Config, Render, apply_qrss, render, streams
+from .traffic import Script, compose
 from .wav import write_wav
 
 DEFAULT_TEXT = "cq cq de sq6emm sq6emm k"
@@ -91,6 +92,11 @@ OVERRIDES = {
     "aurora_toward": "aurora_toward",
     "aurora_activity": "aurora_activity",
     "aurora_burst": "aurora_burst_s",
+    "two_stations": "two_stations",
+    "other_offset": "other_offset_hz",
+    "other_wpm": "other_wpm",
+    "other_db": "other_db",
+    "turnaround": "turnaround_s",
     "rate": "sample_rate",
     "pad": "pad",
     "peak": "peak",
@@ -106,10 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
         epilog='examples:\n'
                '  morsefun "cq cq de sq6emm sq6emm k" --wpm 23 --tone 600\n'
                '  morsefun "cq de sq6emm k" --profile noisy --repeat 3\n'
+               '  morsefun --qso --profile 40m-dx --my-call sq6emm\n'
+               '  morsefun --beacon --profile rain-scatter\n'
+               '  morsefun "db0abc jo62qm [30s]" --wpm 12\n'
                '  morsefun "cq de sq6emm k" -o cq.wav',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("text", nargs="*", help=f"message to key (default: {DEFAULT_TEXT!r})")
+    p.add_argument("text", nargs="*",
+                   help=f"message to key (default: {DEFAULT_TEXT!r}); <AR> is a prosign, "
+                        "[30s] holds the key down for thirty seconds, [2s pause] holds it up")
     p.add_argument("-o", "--out", metavar="FILE",
                    help="write a WAV file instead of playing it")
     p.add_argument("--batch", metavar="FILE", help="key one message per line of FILE")
@@ -122,6 +133,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="print the render details as JSON")
     p.add_argument("-q", "--quiet", action="store_true", help="print nothing but errors")
 
+    g = p.add_argument_group(
+        "a message to copy",
+        "instead of a text, draw one: a QSO or a beacon that fits the profile's "
+        "band and path, with callsigns, locators and procedure the way they are "
+        "heard. Every pass draws a new one; --seed brings one back.")
+    g.add_argument("--qso", action="store_true",
+                   help="both sides of a QSO: report, name and QTH on HF, report and "
+                        "locator on VHF and up, serials in a contest, O/RO/RRR off the "
+                        "Moon, A reports on aurora; the other station is rendered on "
+                        "its own note, speed, level and path")
+    g.add_argument("--beacon", action="store_true",
+                   help="a beacon: callsign and locator at 10 to 15 wpm, and the long "
+                        "carrier most of them key after (or before) the identification")
+    g.add_argument("--my-call", metavar="CALL",
+                   help="put your own callsign in the QSO, or on the beacon")
+    g.add_argument("--my-loc", metavar="LOCATOR",
+                   help="where you are, e.g. JO81LC, if the callsign does not say")
+    g.add_argument("--my-name", metavar="NAME", help="the name you give on the air")
+    g.add_argument("--carrier", action="store_true", default=None,
+                   help="beacon: make it key a carrier")
+    g.add_argument("--no-carrier", dest="carrier", action="store_false",
+                   help="beacon: identification only, no carrier")
+
     k = p.add_argument_group("keying")
     k.add_argument("--wpm", type=float, help="keying speed in words per minute (default: 23)")
     k.add_argument("--effective-wpm", type=float, metavar="WPM",
@@ -131,6 +165,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="QRSS: a dit this many seconds long, read off a waterfall "
                         "instead of by ear (3, 10, 30, 60, 120). Slows the envelope "
                         "down to match and drops the sample rate to 8 kHz")
+
+    k.add_argument("--two-stations", action="store_true", default=None,
+                   help="every other line of the text is the other station in the QSO, "
+                        "on its own note, speed, level and path (what --qso does)")
+    k.add_argument("--other-offset", type=float, metavar="HZ",
+                   help="where the other station sits against your note (default: drawn, "
+                        "15 to 120 Hz either side)")
+    k.add_argument("--other-wpm", type=float, metavar="WPM",
+                   help="how fast the other station sends (default: drawn near yours)")
+    k.add_argument("--other-db", type=float, metavar="DB",
+                   help="the other station's level against yours (default: drawn, -8 to +6)")
+    k.add_argument("--turnaround", type=float, metavar="S",
+                   help="the pause between overs (default: drawn, 0.8 to 2.5 s)")
 
     t = p.add_argument_group("tone")
     t.add_argument("--tone", type=float, help="tone frequency in Hz (default: 600)")
@@ -566,9 +613,16 @@ def _budget(scatter: dict) -> list[str]:
 
 def describe(result: Render, heading: str, profile: str) -> str:
     m = result.meta
+    cfg = m["config"]
     lines = [heading]
     code = str(m["code"])
-    lines.append(f"  text      {m['text']}")
+    overs = str(m["text"]).splitlines() or [""]
+    two = bool(cfg.get("two_stations")) and len(overs) > 1
+    for index, over in enumerate(overs):
+        tag = ("A  " if index % 2 == 0 else "B  ") if two else ""
+        lines.append(("  text      " if index == 0 else "            ") + tag + over)
+    if m.get("script"):
+        lines.append(f"  script    {m['script'].get('note', '')}")
     lines.append(f"  code      {code if len(code) <= 96 else code[:93] + '...'}")
     spacing = (f"Farnsworth to {m['effective_wpm']:.0f} wpm"
                if m["farnsworth"] else "standard spacing")
@@ -576,7 +630,15 @@ def describe(result: Render, heading: str, profile: str) -> str:
     dit = (f"dit {m['dit_ms'] / 1000.0:g} s" if m["dit_ms"] >= 1000
            else f"dit {m['dit_ms']:.1f} ms")
     lines.append(f"  keying    {speed}, {dit}, {spacing}")
-    cfg = m["config"]
+    other = m.get("other_station")
+    if other:
+        about = [f"the other station {other['offset_hz']:+.0f} Hz off",
+                 f"{other['wpm']:.0f} wpm", f"{other['level_db']:+.0f} dB",
+                 f"{other['overs']} over{'s' if other['overs'] != 1 else ''}",
+                 f"{other['turnaround_s']:.1f} s to turn round"]
+        if other.get("sounds_like"):
+            about.append(f"its own path: {other['sounds_like']}")
+        lines.extend(wrap("  other     ", about))
     tone = f"  tone      {m['tone_hz']:.0f} Hz"
     extras = []
     if cfg["drift_hz"]:
@@ -616,6 +678,25 @@ def describe(result: Render, heading: str, profile: str) -> str:
     return "\n".join(lines)
 
 
+def generated(args: argparse.Namespace) -> str | None:
+    """``qso`` or ``beacon`` if the message is to be drawn, else ``None``."""
+    if args.qso and args.beacon:
+        raise ValueError("--qso or --beacon, not both")
+    kind = "qso" if args.qso else "beacon" if args.beacon else None
+    if kind and (args.text or args.batch):
+        raise ValueError(f"--{kind} draws the message; do not give one as well")
+    return kind
+
+
+def apply_script(cfg: Config, script: Script, keep_wpm: bool) -> None:
+    """Put a drawn message's needs into the config: two stations for a QSO, a
+    beacon's speed unless the speed was asked for -- and never faster than
+    the profile sends, so a QRSS beacon stays QRSS."""
+    cfg.two_stations = script.two_stations
+    if script.wpm and not keep_wpm:
+        cfg.wpm = min(float(cfg.wpm), float(script.wpm))
+
+
 def messages(args: argparse.Namespace) -> list[str]:
     if args.batch:
         text = Path(args.batch).read_text(encoding="utf-8")
@@ -643,11 +724,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        texts = messages(args)
-    except OSError as err:
+        kind = generated(args)
+        texts = [""] if kind else messages(args)
+    except (OSError, ValueError) as err:
         parser.error(str(err))
     if not texts:
         parser.error("no messages to key")
+    band_known = "band" in PROFILES[args.profile] or args.band is not None
 
     writing = bool(args.out or args.batch)
     playing = args.play or not writing
@@ -668,8 +751,18 @@ def main(argv: list[str] | None = None) -> int:
         for turn in range(passes):
             # Every message, and every pass over one, is its own draw: seeds count
             # on from the first so the whole run comes back with --seed.
-            cfg = config_from_args(args, base + index * passes + turn)
+            seed = base + index * passes + turn
+            cfg = config_from_args(args, seed)
+            script = None
+            if kind:
+                script = compose(kind, cfg, streams(seed)["traffic"], band_known=band_known,
+                                 my_call=args.my_call, my_loc=args.my_loc,
+                                 my_name=args.my_name, carrier=args.carrier)
+                text = script.text
+                apply_script(cfg, script, keep_wpm=args.wpm is not None or args.qrss is not None)
             result = render(text, cfg)
+            if script:
+                result.meta["script"] = {**script.detail, "note": script.note}
             if not result.meta["characters"]:
                 if turn == 0:
                     print(f"nothing to key in {text!r}", file=sys.stderr)
@@ -695,7 +788,10 @@ def main(argv: list[str] | None = None) -> int:
                         heading += f", {passes}\u00d7 {args.gap:.1f} s apart, a new band each time"
                     print(describe(result, heading, args.profile), flush=True)
                 else:
-                    print(f"  again     seed {cfg.seed}: {one_liner(result)}", flush=True)
+                    again = f"  again     seed {cfg.seed}: {one_liner(result)}"
+                    if script:
+                        again += f"\n            {script.note}"
+                    print(again, flush=True)
 
             if playing:
                 try:

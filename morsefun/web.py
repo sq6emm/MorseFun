@@ -34,12 +34,13 @@ from pathlib import Path
 import numpy as np
 
 from .cell import CHARACTER_VALUES, parse_character
-from .cli import OVERRIDES, describe
+from .cli import DEFAULT_TEXT, OVERRIDES, apply_script, describe
 from .morse import Timing, duration, parse, timeline
 from .profiles import DEFAULT_PROFILE, DESCRIPTIONS, GROUPS, PROFILES, Draw, resolve
 from .propagation import parse_band
 from .render import (MODES, QRSS_DIT_S, Config, apply_qrss, mode_name,
                      qrss_label, render, streams)
+from .traffic import compose
 from .wav import wav_bytes
 
 PAGE = Path(__file__).with_name("page.html")
@@ -51,8 +52,9 @@ _AUDIO = re.compile(r"/audio/([A-Za-z0-9_-]{1,64})\.wav$")
 
 #: Nobody needs to tie the box up for longer than this with one message.  QRSS
 #: is slow on purpose, so the ceiling is minutes rather than seconds -- a
-#: three-second dit spends about half a minute on a single word.
-MAX_CHARACTERS = 300
+#: three-second dit spends about half a minute on a single word.  A whole QSO,
+#: both sides, rig and weather, runs to several hundred characters.
+MAX_CHARACTERS = 1500
 MAX_SECONDS = 2400.0
 KEEP_RENDERS = 12
 
@@ -247,6 +249,7 @@ def options() -> dict:
         "scatter": [name for name in MODES],
         "qrm_style": ["ragchew", "contest", "mixed"],
         "qrss": [3, 10, 30, 60, 120],
+        "generate": ["qso", "beacon"],
     }
 
 
@@ -348,10 +351,21 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, body)
 
     def render(self, payload: dict) -> dict:
-        text = str(payload.get("text") or "cq cq de sq6emm sq6emm k").strip()
+        text = str(payload.get("text") or DEFAULT_TEXT).strip()
         if len(text) > MAX_CHARACTERS:
             raise ValueError(f"keep it under {MAX_CHARACTERS} characters")
         cfg, profile = config_from_payload(payload)
+        script = None
+        kind = str(payload.get("generate") or "").strip().lower()
+        if kind:
+            # The message is drawn from the same seed as the band, so pinning
+            # the seed brings back the QSO as well as the evening.
+            band_known = "band" in PROFILES[profile] or payload.get("band") not in (None, "")
+            script = compose(kind, cfg, streams(cfg.seed)["traffic"], band_known=band_known,
+                             my_call=payload.get("my_call"), my_loc=payload.get("my_loc"))
+            text = script.text
+            apply_script(cfg, script, keep_wpm=payload.get("wpm") not in (None, "")
+                         or payload.get("qrss") not in (None, ""))
         words, _ = parse(text)
         if not any(words):
             raise ValueError("nothing in there has a Morse equivalent")
@@ -361,10 +375,15 @@ class Handler(BaseHTTPRequestHandler):
                              f"{MAX_SECONDS:.0f} s or send it faster")
         started = time.time()
         result = render(text, cfg)
+        if script:
+            result.meta["script"] = {**script.detail, "note": script.note}
         token = self.renders.put(wav_bytes(result.samples, result.sample_rate))
         return {
             # Relative, so it still points here under a proxy's path.
             "audio": f"audio/{token}.wav",
+            "text": text,
+            "two_stations": bool(cfg.two_stations),
+            "script": script.note if script else "",
             "report": describe(result, "", profile).strip("\n"),
             "spectrogram": spectrogram(result.samples, result.sample_rate, cfg.freq,
                                        float(result.meta["dit_ms"]) / 1000.0),

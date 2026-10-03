@@ -24,7 +24,7 @@ from .cell import (Cell, cell_doppler, draw_cell, evolution, parse_character,
                    sounds_like)
 from .dsp import agc, bandpass, db_to_amp, fast_length, rms
 from .moon import draw_moon, faraday_fade, moon_doppler
-from .morse import Timing, duration, parse, timeline, to_code
+from .morse import Character, Element, Timing, duration, parse, timeline, to_code
 from .noise import NoiseSpec, build_noise
 from .propagation import (REFERENCE_RATE_MM_H, AuroraSpec, Band, aurora_doppler,
                           parse_band, reflectivity_dbz)
@@ -36,9 +36,11 @@ from .skywave import draw_iono, iono_carriers, iono_components
 from .synth import ToneSpec, keyed_tone
 
 #: Every random stream in a render, in a fixed order, so a given seed always
-#: hands the same numbers to the same part of the chain.
+#: hands the same numbers to the same part of the chain.  New streams go on the
+#: end: the children of a SeedSequence are numbered, so the old ones keep
+#: drawing what they always drew.
 STREAMS = ("signal", "weather", "scatter", "floor", "crashes", "qrm", "birdies",
-           "profile")
+           "profile", "traffic", "other")
 
 #: The modes that are a volume of weather with cores in it.
 WEATHER_MODES = ("rain", "snow")
@@ -176,6 +178,13 @@ class Config:
     aurora_toward: bool = False
     aurora_activity: float = 0.55
     aurora_burst_s: float = 4.0
+    # the other side of a QSO: every other line of the text is another station,
+    # on its own note, at its own speed and level, down its own path
+    two_stations: bool = False
+    other_offset_hz: float | None = None      # where it sits against our note; drawn
+    other_wpm: float | None = None            # how fast it sends; drawn near ours
+    other_db: float | None = None             # its level against ours; drawn
+    turnaround_s: float | None = None         # the pause between overs; drawn
     # the band
     snr_db: float | None = 10.0
     bandwidth: float = 500.0
@@ -542,6 +551,118 @@ def _station_scatter(cfg: Config, band: Band, cell: Cell, mode: str):
     return apply
 
 
+def overs(text: str, two_stations: bool) -> tuple[list[tuple[int, list[list[Character]]]], list[str]]:
+    """Split the text into overs: who sends each one, and what.
+
+    With one station the whole text is one over, line breaks and all.  With
+    two, every non-blank line is an over and they alternate, the first line
+    being ours: that is how a QSO is written down.
+    """
+    if not two_stations:
+        words, unknown = parse(text)
+        return ([(0, words)] if words else []), unknown
+    out: list[tuple[int, list[list[Character]]]] = []
+    unknown: list[str] = []
+    lines = [line for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        words, bad = parse(line)
+        unknown.extend(u for u in bad if u not in unknown)
+        if words:
+            out.append((index % 2, words))
+    return out, unknown
+
+
+def plan(script: list[tuple[int, list[list[Character]]]], ours: Timing, theirs: Timing,
+         turnaround_s: float) -> tuple[list[Element], list[Element]]:
+    """Two keying timelines of the same length: ours, and the other station's.
+
+    While one sends, the other listens -- an off element as long as the over --
+    and between overs there is the pause an operator takes before answering.
+    """
+    a: list[Element] = []
+    b: list[Element] = []
+    for index, (who, words) in enumerate(script):
+        part = timeline(words, ours if who == 0 else theirs)
+        quiet = Element(False, duration(part), "listening")
+        if who == 0:
+            a.extend(part)
+            b.append(quiet)
+        else:
+            b.extend(part)
+            a.append(quiet)
+        if index < len(script) - 1 and turnaround_s > 0:
+            a.append(Element(False, turnaround_s, "turnaround"))
+            b.append(Element(False, turnaround_s, "turnaround"))
+    return a, b
+
+
+@dataclass
+class OtherStation:
+    """What was drawn for the other side of the QSO."""
+
+    offset_hz: float
+    wpm: float
+    level_db: float
+    turnaround_s: float
+    drift_hz: float
+    qsb_db: float
+
+    def tone_spec(self, cfg: Config) -> ToneSpec:
+        return ToneSpec(freq=max(80.0, cfg.freq + self.offset_hz), rise_ms=cfg.rise_ms,
+                        level=1.0, drift_hz=self.drift_hz, drift_rate=cfg.drift_rate,
+                        qsb_db=self.qsb_db, qsb_rate=cfg.qsb_rate)
+
+
+def draw_other(cfg: Config, rng: np.random.Generator) -> OtherStation:
+    """The other station: a few tens of Hz off, a little faster or slower, a
+    few dB up or down, and its own drift and fading.  Anything pinned is kept."""
+    if cfg.other_offset_hz is not None:
+        offset = float(cfg.other_offset_hz)
+    else:
+        offset = float(rng.uniform(15.0, 120.0)) * (1.0 if rng.random() < 0.5 else -1.0)
+    if cfg.other_wpm is not None:
+        wpm = float(cfg.other_wpm)
+    elif 1.2 / max(cfg.wpm, 1e-6) >= QRSS_DIT_S:
+        wpm = float(cfg.wpm)          # QRSS: both sides key the same dit, by agreement
+    else:
+        wpm = float(rng.uniform(max(8.0, 0.78 * cfg.wpm), 1.22 * cfg.wpm))
+    level = float(cfg.other_db) if cfg.other_db is not None else float(rng.uniform(-8.0, 6.0))
+    if cfg.turnaround_s is not None:
+        turnaround = float(cfg.turnaround_s)
+    else:
+        turnaround = float(rng.uniform(0.8, 2.5))
+    return OtherStation(offset_hz=offset, wpm=wpm, level_db=level, turnaround_s=turnaround,
+                        drift_hz=float(cfg.drift_hz) * float(rng.uniform(0.5, 1.5)),
+                        qsb_db=float(cfg.qsb_db) * float(rng.uniform(0.5, 1.5)))
+
+
+def _path(cfg: Config, env: np.ndarray, band: Band, mode: str, moon,
+          rngs: dict[str, np.random.Generator]):
+    """Send one keying envelope down the path.  Returns audio, info, cell."""
+    if mode in WEATHER_MODES:
+        return _weather_path(cfg, env, band, mode, rngs)
+    if mode == "iono":
+        return (*_iono_path(cfg, env, band, rngs), None)
+    if mode == "moon":
+        return (*_moon_path(cfg, env, band, moon, rngs), None)
+    if mode == "aircraft":
+        return (*_aircraft_path(cfg, env, band, rngs), None)
+    return (*_aurora_path(cfg, env, band, rngs), None)
+
+
+def _received(env: np.ndarray, delay: int, rician_db: float) -> np.ndarray:
+    """Where a station's signal actually is in the file: its keying, moved by
+    the echo delay if there is one, and both if it is an echo test."""
+    if not delay or delay >= env.size:
+        return env
+    late = np.zeros_like(env)
+    late[delay:] = env[:env.size - delay]
+    direct_amp, scatter_amp = rician_weights(rician_db)
+    received = np.maximum(direct_amp * env, scatter_amp * late)
+    peak = float(received.max())
+    return received / peak if peak > 1e-12 else env
+
+
 def render(text: str, config: Config | None = None) -> Render:
     """Render ``text`` as Morse audio under ``config``'s band conditions."""
     cfg = config or Config()
@@ -551,9 +672,13 @@ def render(text: str, config: Config | None = None) -> Render:
     if mode not in MODES:
         raise ValueError(f"unknown scatter mode: {cfg.scatter!r}")
 
-    words, unknown = parse(text)
+    script, unknown = overs(text, cfg.two_stations)
+    words = [w for _, ws in script for w in ws]
     timing = Timing(cfg.wpm, cfg.effective_wpm)
-    elements = timeline(words, timing)
+    other = draw_other(cfg, rngs["other"]) if cfg.two_stations else None
+    has_other = other is not None and any(who == 1 for who, _ in script)
+    theirs = Timing(other.wpm, cfg.effective_wpm) if other else timing
+    elements, elements_b = plan(script, timing, theirs, other.turnaround_s if other else 0.0)
     keyed = duration(elements)
 
     # The Moon has to be drawn before the buffer is sized: the echo arrives
@@ -583,27 +708,35 @@ def render(text: str, config: Config | None = None) -> Render:
     direct, env = keyed_tone(
         elements, cfg.sample_rate, cfg.tone_spec(), rngs["signal"], pad=cfg.pad, length=n
     )
+    env_b = np.zeros(0)
+    if has_other:
+        direct_b, env_b = keyed_tone(
+            elements_b, cfg.sample_rate, other.tone_spec(cfg), rngs["other"],
+            pad=cfg.pad, length=n)
 
     scatter_info: dict[str, object] = {}
+    other_info: dict[str, object] = {}
     cell: Cell | None = None
     if cfg.scatter_spec().active:
-        if mode in WEATHER_MODES:
-            scattered, scatter_info, cell = _weather_path(cfg, env, band, mode, rngs)
-        elif mode == "iono":
-            scattered, scatter_info = _iono_path(cfg, env, band, rngs)
-        elif mode == "moon":
-            scattered, scatter_info = _moon_path(cfg, env, band, moon, rngs)
-        elif mode == "aircraft":
-            scattered, scatter_info = _aircraft_path(cfg, env, band, rngs)
-        else:
-            scattered, scatter_info = _aurora_path(cfg, env, band, rngs)
+        scattered, scatter_info, cell = _path(cfg, env, band, mode, moon, rngs)
         direct_amp, scatter_amp = rician_weights(cfg.rician_db)
         # The rain on the way is charged against the signal-to-noise ratio below,
         # not here: scaling the whole signal would cancel out when the noise is
         # set from it, and a path loss that changes nothing is a lie.
         signal = direct_amp * direct + scatter_amp * scattered
+        if has_other:
+            # The other station is somewhere else, so it comes down a path of
+            # its own: the same weather, the same layer, the same Moon, but a
+            # fresh draw of everything that is drawn.
+            scattered_b, other_info, _ = _path(cfg, env_b, band, mode, moon, rngs)
+            signal_b = direct_amp * direct_b + scatter_amp * scattered_b
     else:
         signal = direct
+        if has_other:
+            signal_b = direct_b
+
+    if has_other:
+        signal = signal + db_to_amp(other.level_db) * signal_b
 
     noisy = cfg.snr_db is not None
     if noisy:
@@ -613,18 +746,15 @@ def render(text: str, config: Config | None = None) -> Render:
     # the echo lands two and a half seconds later, so measuring the key-down
     # power against the transmitted envelope would measure the gaps instead, and
     # scale the noise against nothing.  On an echo test both are present.
-    received = env
     delay = int(round(float(scatter_info.get("delay_s", 0.0)) * cfg.sample_rate))
-    if delay and delay < env.size:
-        late = np.zeros_like(env)
-        late[delay:] = env[:env.size - delay]
-        direct_amp, scatter_amp = rician_weights(cfg.rician_db)
-        received = np.maximum(direct_amp * env, scatter_amp * late)
-        peak = float(received.max())
-        received = received / peak if peak > 1e-12 else env
+    received = _received(env, delay, cfg.rician_db)
 
+    # S/N is ours: the key-down power of our station against the floor.  The
+    # gaps that count as quiet are the ones in which neither station is sending.
     key_down = received > 0.5
     key_up = received < 0.02
+    if has_other:
+        key_up &= _received(env_b, delay, cfg.rician_db) < 0.02
     down_power = float(np.mean(np.square(signal[key_down]))) if key_down.any() else 0.0
 
     # What the signal is worth: reflectivity sets how strong the return is
@@ -723,6 +853,14 @@ def render(text: str, config: Config | None = None) -> Render:
         "wavelength_mm": band.wavelength_m * 1000.0,
         "hz_per_mps": float(band.doppler_hz(1.0)),
         "scatter": scatter_info,
+        "overs": len(script),
+        "other_station": ({
+            "offset_hz": other.offset_hz, "wpm": other.wpm, "level_db": other.level_db,
+            "turnaround_s": other.turnaround_s,
+            "overs": sum(1 for who, _ in script if who == 1),
+            "sounds_like": other_info.get("sounds_like"),
+            "spread_hz": other_info.get("spread_hz"),
+        } if has_other else None),
         "qrss": qrss,
         "snr_db": cfg.snr_db,
         "effective_snr_db": effective_snr,

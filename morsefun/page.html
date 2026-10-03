@@ -70,6 +70,7 @@
           font-size: .72rem; margin: 4px 0 12px; font-family: var(--mono); }
   pre { font-family: var(--mono); font-size: .8rem; white-space: pre-wrap;
         margin: 0; color: var(--ink); }
+  code { font-family: var(--mono); font-size: .78rem; color: var(--hot); }
   .verdict { font-size: 1.02rem; margin: 0 0 10px; }
   .verdict b { color: var(--warm); }
   .meta { color: var(--dim); font-size: .78rem; font-family: var(--mono);
@@ -84,8 +85,9 @@
   <h1>Morse<span>Fun</span></h1>
   <p class="lede">Morse code the way a band actually delivers it. Pick where you
   are &mdash; 2200 m, HF, 2 m, 10 GHz &mdash; then pick how the signal got there:
-  a skywave hop, an auroral curtain, a rain cell, an airliner, the Moon. Every
-  render draws that path afresh, so the same mode never sounds quite the same
+  a skywave hop, an auroral curtain, a rain cell, an airliner, the Moon. Type a
+  message, or have it draw a QSO or a beacon that belongs on that band. Every
+  render draws the path afresh, so the same mode never sounds quite the same
   twice, and the report says what it drew and why it sounds like that.</p>
 </header>
 
@@ -99,7 +101,20 @@
 
     <fieldset>
       <legend>message</legend>
+      <div class="row three">
+        <div><label for="generate">send</label><select id="generate" name="generate">
+          <option value="">what I typed</option>
+          <option value="qso">a QSO, both sides</option>
+          <option value="beacon">a beacon</option>
+        </select></div>
+        <div><label for="my_call">your call</label><input id="my_call" name="my_call" placeholder="drawn" autocapitalize="characters" spellcheck="false"></div>
+        <div><label for="my_loc">your locator</label><input id="my_loc" name="my_loc" placeholder="from the call" autocapitalize="characters" spellcheck="false"></div>
+      </div>
       <textarea id="text" name="text" spellcheck="false">cq cq de sq6emm sq6emm k</textarea>
+      <label class="check"><input type="checkbox" id="two_stations" name="two_stations"> two stations: every other line is the other side, on its own note, speed and path</label>
+      <p class="hint">A drawn QSO or beacon fits the band and the path you picked, and lands here
+      so you can read along or edit it. <code>[30s]</code> in a message holds the key down for
+      thirty seconds, the carrier a beacon sends; <code>[2s pause]</code> holds it up.</p>
       <div class="row three">
         <div><label for="wpm">wpm</label><input id="wpm" name="wpm" type="number" min="0.1" max="60" step="1" placeholder="profile"></div>
         <div><label for="qrss">QRSS dit s</label><select id="qrss" name="qrss"></select></div>
@@ -333,6 +348,12 @@ async function send() {
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || response.statusText);
     report.textContent = body.report;
+    if (body.script) {
+      // What was drawn goes into the box, so it can be read along or edited;
+      // editing it switches back to sending what is typed.
+      document.getElementById('text').value = body.text;
+      document.getElementById('two_stations').checked = !!body.two_stations;
+    }
     const scatter = body.meta.scatter || {};
     const qrss = body.meta.qrss || {};
     let says = '<b>' + body.profile + '</b> on ' + body.meta.band + ', ' +
@@ -344,6 +365,13 @@ async function send() {
       if (scatter.sweep_hz_s) says += ', sliding ' + scatter.sweep_hz_s.toFixed(1) + ' Hz/s';
     } else if (body.meta.measured_snr_db != null) {
       says += '<br>S/N ' + body.meta.measured_snr_db.toFixed(1) + ' dB measured, direct path';
+    }
+    if (body.script) says += '<br>' + body.script.replace(/</g, '&lt;');
+    if (body.meta.other_station) {
+      const o = body.meta.other_station;
+      says += '<br>the other station ' + (o.offset_hz >= 0 ? '+' : '') + o.offset_hz.toFixed(0) +
+              ' Hz off, ' + o.wpm.toFixed(0) + ' wpm, ' + (o.level_db >= 0 ? '+' : '') +
+              o.level_db.toFixed(0) + ' dB' + (o.sounds_like ? ', its own path: ' + o.sounds_like : '');
     }
     if (qrss.label) {
       says += '<br><b>' + qrss.label + '</b>: a ' + asHz(qrss.bandwidth_hz) + ' bin, ' +
@@ -380,6 +408,10 @@ async function send() {
 }
 
 form.addEventListener('submit', (event) => { event.preventDefault(); send(); });
+document.getElementById('generate').addEventListener('change', () => send());
+document.getElementById('text').addEventListener('input', () => {
+  document.getElementById('generate').value = '';
+});
 document.getElementById('again').addEventListener('click', () => {
   document.getElementById('seed').value = '';
   send();
